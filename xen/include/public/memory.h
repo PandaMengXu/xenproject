@@ -465,6 +465,27 @@ DEFINE_XEN_GUEST_HANDLE(xen_mem_sharing_op_t);
  * The zero value is appropiate.
  */
 
+/* hypercall to read/write msr */
+#define XENMEM_rdmsr                        28
+struct rdmsr_op{
+    struct rdmsr_op_in {
+        uint32_t    ecx;
+        cpumask_t   cpumask;
+       // int         n_cpu;
+    } in;
+    struct rdmsr_op_out {
+        uint32_t eax, edx;
+    } out[12]; /* at most 12 cpu for simplicity right now */
+};
+typedef struct rdmsr_op rdmsr_op_t;
+#define XENMEM_wrmsr                        29
+struct wrmsr_op{
+    struct wrmsr_op_in {
+        uint32_t ecx, edx, eax;
+    } in;
+};
+typedef struct wrmsr_op wrmsr_op_t;
+
 #endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
 
 #endif /* __XEN_PUBLIC_MEMORY_H__ */

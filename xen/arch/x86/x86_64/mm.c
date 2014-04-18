@@ -957,9 +957,17 @@ long subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg)
     xen_pfn_t mfn, last_mfn;
     unsigned int i;
     long rc = 0;
+    rdmsr_op_t rdmsr_op_var;
+    wrmsr_op_t wrmsr_op_var;
 
     switch ( op )
     {
+    case XENMEM_rdmsr:
+        if( copy_from_guest(&rdmsr_op_var, arg, 1) )
+            return -EFAULT;
+        on_selected_cpus(rdmsr_op_var.in.cpumask, rdmsr_f, );
+    case XENMEM_wrmsr:
+
     case XENMEM_machphys_mfn_list:
         if ( copy_from_guest(&xmml, arg, 1) )
             return -EFAULT;
