@@ -110,9 +110,10 @@ static void amd_xc_cpuid_policy(
                     bitmaskof(X86_FEATURE_3DNOWPREFETCH) |
                     bitmaskof(X86_FEATURE_OSVW) |
                     bitmaskof(X86_FEATURE_XOP) |
+                    bitmaskof(X86_FEATURE_LWP) |
                     bitmaskof(X86_FEATURE_FMA4) |
                     bitmaskof(X86_FEATURE_TBM) |
-                    bitmaskof(X86_FEATURE_LWP));
+                    bitmaskof(X86_FEATURE_DBEXT));
         regs[3] &= (0x0183f3ff | /* features shared with 0x00000001:EDX */
                     (is_pae ? bitmaskof(X86_FEATURE_NX) : 0) |
                     (is_64bit ? bitmaskof(X86_FEATURE_LM) : 0) |
@@ -559,6 +560,17 @@ static int xc_cpuid_policy(
     const unsigned int *input, unsigned int *regs)
 {
     xc_dominfo_t        info;
+
+    /*
+     * For hypervisor leaves (0x4000XXXX) only 0x4000xx00.EAX[7:0] bits (max
+     * number of leaves) can be set by user. Hypervisor will enforce this so
+     * all other bits are don't-care and we can set them to zero.
+     */
+    if ( (input[0] & 0xffff0000) == 0x40000000 )
+    {
+        regs[0] = regs[1] = regs[2] = regs[3] = 0;
+        return 0;
+    }
 
     if ( xc_domain_getinfo(xch, domid, 1, &info) == 0 )
         return -EINVAL;

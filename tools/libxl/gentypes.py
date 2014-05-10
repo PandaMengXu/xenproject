@@ -220,13 +220,20 @@ def libxl_C_type_gen_json(ty, v, indent = "    ", parent = None):
             s += "case %s:\n" % f.enumname
             if f.type is not None:
                 s += libxl_C_type_gen_json(f.type, fexpr, indent + "    ", nparent)
+            else:
+                s += "    s = yajl_gen_map_open(hand);\n"
+                s += "    if (s != yajl_gen_status_ok)\n"
+                s += "        goto out;\n"
+                s += "    s = yajl_gen_map_close(hand);\n"
+                s += "    if (s != yajl_gen_status_ok)\n"
+                s += "        goto out;\n"
             s += "    break;\n"
         s += "}\n"
     elif isinstance(ty, idl.Struct) and (parent is None or ty.json_fn is None):
         s += "s = yajl_gen_map_open(hand);\n"
         s += "if (s != yajl_gen_status_ok)\n"
         s += "    goto out;\n"
-        for f in [f for f in ty.fields if not f.const]:
+        for f in [f for f in ty.fields if not f.const and not f.type.private]:
             (nparent,fexpr) = ty.member(v, f, parent is None)
             s += "s = yajl_gen_string(hand, (const unsigned char *)\"%s\", sizeof(\"%s\")-1);\n" % (f.name, f.name)
             s += "if (s != yajl_gen_status_ok)\n"

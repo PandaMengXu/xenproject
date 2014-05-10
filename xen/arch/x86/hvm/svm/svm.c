@@ -160,13 +160,27 @@ void svm_intercept_msr(struct vcpu *v, uint32_t msr, int flags)
 static void svm_save_dr(struct vcpu *v)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
+    unsigned int flag_dr_dirty = v->arch.hvm_vcpu.flag_dr_dirty;
 
-    if ( !v->arch.hvm_vcpu.flag_dr_dirty )
+    if ( !flag_dr_dirty )
         return;
 
     /* Clear the DR dirty flag and re-enable intercepts for DR accesses. */
     v->arch.hvm_vcpu.flag_dr_dirty = 0;
     vmcb_set_dr_intercepts(vmcb, ~0u);
+
+    if ( flag_dr_dirty & 2 )
+    {
+        svm_intercept_msr(v, MSR_AMD64_DR0_ADDRESS_MASK, MSR_INTERCEPT_RW);
+        svm_intercept_msr(v, MSR_AMD64_DR1_ADDRESS_MASK, MSR_INTERCEPT_RW);
+        svm_intercept_msr(v, MSR_AMD64_DR2_ADDRESS_MASK, MSR_INTERCEPT_RW);
+        svm_intercept_msr(v, MSR_AMD64_DR3_ADDRESS_MASK, MSR_INTERCEPT_RW);
+
+        rdmsrl(MSR_AMD64_DR0_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[0]);
+        rdmsrl(MSR_AMD64_DR1_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[1]);
+        rdmsrl(MSR_AMD64_DR2_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[2]);
+        rdmsrl(MSR_AMD64_DR3_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[3]);
+    }
 
     v->arch.debugreg[0] = read_debugreg(0);
     v->arch.debugreg[1] = read_debugreg(1);
@@ -178,11 +192,31 @@ static void svm_save_dr(struct vcpu *v)
 
 static void __restore_debug_registers(struct vmcb_struct *vmcb, struct vcpu *v)
 {
+    unsigned int ecx;
+
     if ( v->arch.hvm_vcpu.flag_dr_dirty )
         return;
 
     v->arch.hvm_vcpu.flag_dr_dirty = 1;
     vmcb_set_dr_intercepts(vmcb, 0);
+
+    ASSERT(v == current);
+    hvm_cpuid(0x80000001, NULL, NULL, &ecx, NULL);
+    if ( test_bit(X86_FEATURE_DBEXT & 31, &ecx) )
+    {
+        svm_intercept_msr(v, MSR_AMD64_DR0_ADDRESS_MASK, MSR_INTERCEPT_NONE);
+        svm_intercept_msr(v, MSR_AMD64_DR1_ADDRESS_MASK, MSR_INTERCEPT_NONE);
+        svm_intercept_msr(v, MSR_AMD64_DR2_ADDRESS_MASK, MSR_INTERCEPT_NONE);
+        svm_intercept_msr(v, MSR_AMD64_DR3_ADDRESS_MASK, MSR_INTERCEPT_NONE);
+
+        wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[0]);
+        wrmsrl(MSR_AMD64_DR1_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[1]);
+        wrmsrl(MSR_AMD64_DR2_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[2]);
+        wrmsrl(MSR_AMD64_DR3_ADDRESS_MASK, v->arch.hvm_svm.dr_mask[3]);
+
+        /* Can't use hvm_cpuid() in svm_save_dr(): v != current. */
+        v->arch.hvm_vcpu.flag_dr_dirty |= 2;
+    }
 
     write_debugreg(0, v->arch.debugreg[0]);
     write_debugreg(1, v->arch.debugreg[1]);
@@ -318,7 +352,8 @@ static void svm_save_cpu_state(struct vcpu *v, struct hvm_hw_cpu *data)
     data->msr_efer         = v->arch.hvm_vcpu.guest_efer;
     data->msr_flags        = -1ULL;
 
-    data->tsc = hvm_get_guest_tsc(v);
+    data->tsc = hvm_get_guest_tsc_fixed(v,
+                                        v->domain->arch.hvm_domain.sync_tsc);
 }
 
 
@@ -334,7 +369,7 @@ static void svm_load_cpu_state(struct vcpu *v, struct hvm_hw_cpu *data)
     v->arch.hvm_vcpu.guest_efer = data->msr_efer;
     svm_update_guest_efer(v);
 
-    hvm_set_guest_tsc(v, data->tsc);
+    hvm_set_guest_tsc_fixed(v, data->tsc, v->domain->arch.hvm_domain.sync_tsc);
 }
 
 static void svm_save_vmcb_ctxt(struct vcpu *v, struct hvm_hw_cpu *ctxt)
@@ -353,6 +388,72 @@ static int svm_load_vmcb_ctxt(struct vcpu *v, struct hvm_hw_cpu *ctxt)
     }
 
     return 0;
+}
+
+static unsigned int __init svm_init_msr(void)
+{
+    return boot_cpu_has(X86_FEATURE_DBEXT) ? 4 : 0;
+}
+
+static void svm_save_msr(struct vcpu *v, struct hvm_msr *ctxt)
+{
+    if ( boot_cpu_has(X86_FEATURE_DBEXT) )
+    {
+        ctxt->msr[ctxt->count].val = v->arch.hvm_svm.dr_mask[0];
+        if ( ctxt->msr[ctxt->count].val )
+            ctxt->msr[ctxt->count++].index = MSR_AMD64_DR0_ADDRESS_MASK;
+
+        ctxt->msr[ctxt->count].val = v->arch.hvm_svm.dr_mask[1];
+        if ( ctxt->msr[ctxt->count].val )
+            ctxt->msr[ctxt->count++].index = MSR_AMD64_DR1_ADDRESS_MASK;
+
+        ctxt->msr[ctxt->count].val = v->arch.hvm_svm.dr_mask[2];
+        if ( ctxt->msr[ctxt->count].val )
+            ctxt->msr[ctxt->count++].index = MSR_AMD64_DR2_ADDRESS_MASK;
+
+        ctxt->msr[ctxt->count].val = v->arch.hvm_svm.dr_mask[3];
+        if ( ctxt->msr[ctxt->count].val )
+            ctxt->msr[ctxt->count++].index = MSR_AMD64_DR3_ADDRESS_MASK;
+    }
+}
+
+static int svm_load_msr(struct vcpu *v, struct hvm_msr *ctxt)
+{
+    unsigned int i, idx;
+    int err = 0;
+
+    for ( i = 0; i < ctxt->count; ++i )
+    {
+        switch ( idx = ctxt->msr[i].index )
+        {
+        case MSR_AMD64_DR0_ADDRESS_MASK:
+            if ( !boot_cpu_has(X86_FEATURE_DBEXT) )
+                err = -ENXIO;
+            else if ( ctxt->msr[i].val >> 32 )
+                err = -EDOM;
+            else
+                v->arch.hvm_svm.dr_mask[0] = ctxt->msr[i].val;
+            break;
+
+        case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
+            if ( !boot_cpu_has(X86_FEATURE_DBEXT) )
+                err = -ENXIO;
+            else if ( ctxt->msr[i].val >> 32 )
+                err = -EDOM;
+            else
+                v->arch.hvm_svm.dr_mask[idx - MSR_AMD64_DR1_ADDRESS_MASK + 1] =
+                    ctxt->msr[i].val;
+            break;
+
+        default:
+            continue;
+        }
+        if ( err )
+            break;
+        ctxt->msr[i]._rsvd = 1;
+    }
+
+    return err;
 }
 
 static void svm_fpu_enter(struct vcpu *v)
@@ -680,7 +781,7 @@ static uint64_t svm_get_tsc_offset(uint64_t host_tsc, uint64_t guest_tsc,
     return guest_tsc - offset;
 }
 
-static void svm_set_tsc_offset(struct vcpu *v, u64 offset)
+static void svm_set_tsc_offset(struct vcpu *v, u64 offset, u64 at_tsc)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
     struct vmcb_struct *n1vmcb, *n2vmcb;
@@ -688,11 +789,15 @@ static void svm_set_tsc_offset(struct vcpu *v, u64 offset)
     struct domain *d = v->domain;
     uint64_t host_tsc, guest_tsc;
 
-    guest_tsc = hvm_get_guest_tsc(v);
+    guest_tsc = hvm_get_guest_tsc_fixed(v, at_tsc);
 
     /* Re-adjust the offset value when TSC_RATIO is available */
-    if ( cpu_has_tsc_ratio && d->arch.vtsc ) {
-        rdtscll(host_tsc);
+    if ( cpu_has_tsc_ratio && !d->arch.vtsc )
+    {
+        if ( at_tsc )
+            host_tsc = at_tsc;
+        else
+            rdtscll(host_tsc);
         offset = svm_get_tsc_offset(host_tsc, guest_tsc, vcpu_tsc_ratio(v));
     }
 
@@ -728,7 +833,7 @@ static void svm_set_rdtsc_exiting(struct vcpu *v, bool_t enable)
     general1_intercepts &= ~GENERAL1_INTERCEPT_RDTSC;
     general2_intercepts &= ~GENERAL2_INTERCEPT_RDTSCP;
 
-    if ( enable && !cpu_has_tsc_ratio )
+    if ( enable )
     {
         general1_intercepts |= GENERAL1_INTERCEPT_RDTSC;
         general2_intercepts |= GENERAL2_INTERCEPT_RDTSCP;
@@ -847,13 +952,13 @@ static int svm_update_lwp_cfg(struct vcpu *v, uint64_t msr_content)
 static inline void svm_tsc_ratio_save(struct vcpu *v)
 {
     /* Other vcpus might not have vtsc enabled. So disable TSC_RATIO here. */
-    if ( cpu_has_tsc_ratio && v->domain->arch.vtsc )
+    if ( cpu_has_tsc_ratio && !v->domain->arch.vtsc )
         wrmsrl(MSR_AMD64_TSC_RATIO, DEFAULT_TSC_RATIO);
 }
 
 static inline void svm_tsc_ratio_load(struct vcpu *v)
 {
-    if ( cpu_has_tsc_ratio && v->domain->arch.vtsc ) 
+    if ( cpu_has_tsc_ratio && !v->domain->arch.vtsc ) 
         wrmsrl(MSR_AMD64_TSC_RATIO, vcpu_tsc_ratio(v));
 }
 
@@ -1451,6 +1556,8 @@ static int svm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
 
     switch ( msr )
     {
+        unsigned int ecx;
+
     case MSR_IA32_SYSENTER_CS:
         *msr_content = v->arch.hvm_svm.guest_sysenter_cs;
         break;
@@ -1526,6 +1633,21 @@ static int svm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
         vpmu_do_rdmsr(msr, msr_content);
         break;
 
+    case MSR_AMD64_DR0_ADDRESS_MASK:
+        hvm_cpuid(0x80000001, NULL, NULL, &ecx, NULL);
+        if ( !test_bit(X86_FEATURE_DBEXT & 31, &ecx) )
+            goto gpf;
+        *msr_content = v->arch.hvm_svm.dr_mask[0];
+        break;
+
+    case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
+        hvm_cpuid(0x80000001, NULL, NULL, &ecx, NULL);
+        if ( !test_bit(X86_FEATURE_DBEXT & 31, &ecx) )
+            goto gpf;
+        *msr_content =
+            v->arch.hvm_svm.dr_mask[msr - MSR_AMD64_DR1_ADDRESS_MASK + 1];
+        break;
+
     case MSR_AMD_OSVW_ID_LENGTH:
     case MSR_AMD_OSVW_STATUS:
         ret = svm_handle_osvw(v, msr, msr_content, 1);
@@ -1594,6 +1716,8 @@ static int svm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
 
     switch ( msr )
     {
+        unsigned int ecx;
+
     case MSR_IA32_SYSENTER_CS:
         vmcb->sysenter_cs = v->arch.hvm_svm.guest_sysenter_cs = msr_content;
         break;
@@ -1667,6 +1791,21 @@ static int svm_msr_write_intercept(unsigned int msr, uint64_t msr_content)
          * all write accesses. This behaviour matches real HW, so guests should
          * have no problem with this.
          */
+        break;
+
+    case MSR_AMD64_DR0_ADDRESS_MASK:
+        hvm_cpuid(0x80000001, NULL, NULL, &ecx, NULL);
+        if ( !test_bit(X86_FEATURE_DBEXT & 31, &ecx) || (msr_content >> 32) )
+            goto gpf;
+        v->arch.hvm_svm.dr_mask[0] = msr_content;
+        break;
+
+    case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
+        hvm_cpuid(0x80000001, NULL, NULL, &ecx, NULL);
+        if ( !test_bit(X86_FEATURE_DBEXT & 31, &ecx) || (msr_content >> 32) )
+            goto gpf;
+        v->arch.hvm_svm.dr_mask[msr - MSR_AMD64_DR1_ADDRESS_MASK + 1] =
+            msr_content;
         break;
 
     case MSR_AMD_OSVW_ID_LENGTH:
@@ -1967,15 +2106,10 @@ static void svm_vmexit_mce_intercept(
     }
 }
 
-static void wbinvd_ipi(void *info)
-{
-    wbinvd();
-}
-
 static void svm_wbinvd_intercept(void)
 {
     if ( cache_flush_permitted(current->domain) )
-        on_each_cpu(wbinvd_ipi, NULL, 1);
+        flush_all(FLUSH_CACHE);
 }
 
 static void svm_vmexit_do_invalidate_cache(struct cpu_user_regs *regs)
@@ -2022,6 +2156,9 @@ static struct hvm_function_table __initdata svm_function_table = {
     .vcpu_destroy         = svm_vcpu_destroy,
     .save_cpu_ctxt        = svm_save_vmcb_ctxt,
     .load_cpu_ctxt        = svm_load_vmcb_ctxt,
+    .init_msr             = svm_init_msr,
+    .save_msr             = svm_save_msr,
+    .load_msr             = svm_load_msr,
     .get_interrupt_shadow = svm_get_interrupt_shadow,
     .set_interrupt_shadow = svm_set_interrupt_shadow,
     .guest_x86_mode       = svm_guest_x86_mode,
@@ -2420,7 +2557,17 @@ void svm_vmexit_handler(struct cpu_user_regs *regs)
         perfc_incra(svmexits, VMEXIT_NPF_PERFC);
         if ( cpu_has_svm_decode )
             v->arch.hvm_svm.cached_insn_len = vmcb->guest_ins_len & 0xf;
-        svm_do_nested_pgfault(v, regs, vmcb->exitinfo1, vmcb->exitinfo2);
+        rc = vmcb->exitinfo1 & PFEC_page_present
+             ? p2m_pt_handle_deferred_changes(vmcb->exitinfo2) : 0;
+        if ( rc >= 0 )
+            svm_do_nested_pgfault(v, regs, vmcb->exitinfo1, vmcb->exitinfo2);
+        else
+        {
+            printk(XENLOG_G_ERR
+                   "%pv: Error %d handling NPF (gpa=%08lx ec=%04lx)\n",
+                   v, rc, vmcb->exitinfo2, vmcb->exitinfo1);
+            domain_crash(v->domain);
+        }
         v->arch.hvm_svm.cached_insn_len = 0;
         break;
 

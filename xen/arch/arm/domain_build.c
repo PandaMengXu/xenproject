@@ -69,19 +69,15 @@ static void allocate_memory_11(struct domain *d, struct kernel_info *kinfo)
 {
     paddr_t start;
     paddr_t size;
-    struct page_info *pg = NULL;
+    struct page_info *pg;
     unsigned int order = get_order_from_bytes(dom0_mem);
     int res;
     paddr_t spfn;
-    unsigned int bits;
 
-    for ( bits = PAGE_SHIFT + 1; bits < PADDR_BITS; bits++ )
-    {
-        pg = alloc_domheap_pages(d, order, MEMF_bits(bits));
-        if ( pg != NULL )
-            break;
-    }
-
+    if ( is_32bit_domain(d) )
+        pg = alloc_domheap_pages(d, order, MEMF_bits(32));
+    else
+        pg = alloc_domheap_pages(d, order, 0);
     if ( !pg )
         panic("Failed to allocate contiguous memory for dom0");
 
@@ -620,8 +616,10 @@ static int make_timer_node(const struct domain *d, void *fdt,
     u32 len;
     const void *compatible;
     int res;
-    const struct dt_irq *irq;
+    unsigned int irq;
     gic_interrupt_t intrs[3];
+    u32 clock_frequency;
+    bool_t clock_valid;
 
     DPRINT("Create timer node\n");
 
@@ -647,21 +645,33 @@ static int make_timer_node(const struct domain *d, void *fdt,
     if ( res )
         return res;
 
-    irq = timer_dt_irq(TIMER_PHYS_SECURE_PPI);
-    DPRINT("  Secure interrupt %u\n", irq->irq);
-    set_interrupt_ppi(intrs[0], irq->irq, 0xf, irq->type);
+    /* The timer IRQ is emulated by Xen. It always exposes an active-low
+     * level-sensitive interrupt */
 
-    irq = timer_dt_irq(TIMER_PHYS_NONSECURE_PPI);
-    DPRINT("  Non secure interrupt %u\n", irq->irq);
-    set_interrupt_ppi(intrs[1], irq->irq, 0xf, irq->type);
+    irq = timer_get_irq(TIMER_PHYS_SECURE_PPI);
+    DPRINT("  Secure interrupt %u\n", irq);
+    set_interrupt_ppi(intrs[0], irq, 0xf, DT_IRQ_TYPE_LEVEL_LOW);
 
-    irq = timer_dt_irq(TIMER_VIRT_PPI);
-    DPRINT("  Virt interrupt %u\n", irq->irq);
-    set_interrupt_ppi(intrs[2], irq->irq, 0xf, irq->type);
+    irq = timer_get_irq(TIMER_PHYS_NONSECURE_PPI);
+    DPRINT("  Non secure interrupt %u\n", irq);
+    set_interrupt_ppi(intrs[1], irq, 0xf, DT_IRQ_TYPE_LEVEL_LOW);
+
+    irq = timer_get_irq(TIMER_VIRT_PPI);
+    DPRINT("  Virt interrupt %u\n", irq);
+    set_interrupt_ppi(intrs[2], irq, 0xf, DT_IRQ_TYPE_LEVEL_LOW);
 
     res = fdt_property_interrupts(fdt, intrs, 3);
     if ( res )
         return res;
+
+    clock_valid = dt_property_read_u32(dev, "clock-frequency",
+                                       &clock_frequency);
+    if ( clock_valid )
+    {
+        res = fdt_property_cell(fdt, "clock-frequency", clock_frequency);
+        if ( res )
+            return res;
+    }
 
     res = fdt_end_node(fdt);
 
@@ -715,8 +725,13 @@ static int map_device(struct domain *d, const struct dt_device_node *dev)
         }
 
         DPRINT("irq %u = %u type = 0x%x\n", i, irq.irq, irq.type);
-        /* Don't check return because the IRQ can be use by multiple device */
-        gic_route_irq_to_guest(d, &irq, dt_node_name(dev));
+        res = route_dt_irq_to_guest(d, &irq, dt_node_name(dev));
+        if ( res )
+        {
+            printk(XENLOG_ERR "Unable to route IRQ %u to domain %u\n",
+                   irq.irq, d->domain_id);
+            return res;
+        }
     }
 
     /* Map the address ranges */
@@ -739,8 +754,9 @@ static int map_device(struct domain *d, const struct dt_device_node *dev)
         if ( res )
         {
             printk(XENLOG_ERR "Unable to map 0x%"PRIx64
-                   " - 0x%"PRIx64" in dom0\n",
-                   addr & PAGE_MASK, PAGE_ALIGN(addr + size) - 1);
+                   " - 0x%"PRIx64" in domain %d\n",
+                   addr & PAGE_MASK, PAGE_ALIGN(addr + size) - 1,
+                   d->domain_id);
             return res;
         }
     }
@@ -1002,15 +1018,15 @@ int construct_dom0(struct domain *d)
 
     kinfo.unassigned_mem = dom0_mem;
 
-    allocate_memory(d, &kinfo);
-
-    rc = kernel_prepare(&kinfo);
+    rc = kernel_probe(&kinfo);
     if ( rc < 0 )
         return rc;
 
 #ifdef CONFIG_ARM_64
     d->arch.type = kinfo.type;
 #endif
+
+    allocate_memory(d, &kinfo);
 
     rc = prepare_dtb(d, &kinfo);
     if ( rc < 0 )
@@ -1024,8 +1040,8 @@ int construct_dom0(struct domain *d)
     p2m_restore_state(v);
 
     /*
-     * kernel_load will determine the placement of the initrd & fdt in
-     * RAM, so call it first.
+     * kernel_load will determine the placement of the kernel as well
+     * as the initrd & fdt in RAM, so call it first.
      */
     kernel_load(&kinfo);
     /* initrd_load will fix up the fdt, so call it before dtb_load */

@@ -549,7 +549,7 @@ int arch_domain_create(struct domain *d, unsigned int domcr_flags)
 
     if ( !is_idle_domain(d) )
     {
-        d->arch.cpuids = xzalloc_array(cpuid_input_t, MAX_CPUID_INPUT);
+        d->arch.cpuids = xmalloc_array(cpuid_input_t, MAX_CPUID_INPUT);
         rc = -ENOMEM;
         if ( d->arch.cpuids == NULL )
             goto fail;
@@ -1341,14 +1341,7 @@ static void paravirt_ctxt_switch_to(struct vcpu *v)
         write_cr4(cr4);
 
     if ( unlikely(v->arch.debugreg[7] & DR7_ACTIVE_MASK) )
-    {
-        write_debugreg(0, v->arch.debugreg[0]);
-        write_debugreg(1, v->arch.debugreg[1]);
-        write_debugreg(2, v->arch.debugreg[2]);
-        write_debugreg(3, v->arch.debugreg[3]);
-        write_debugreg(6, v->arch.debugreg[6]);
-        write_debugreg(7, v->arch.debugreg[7]);
-    }
+        activate_debugregs(v);
 
     if ( (v->domain->arch.tsc_mode ==  TSC_MODE_PVRDTSCP) &&
          boot_cpu_has(X86_FEATURE_RDTSCP) )

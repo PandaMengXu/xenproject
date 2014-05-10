@@ -82,6 +82,7 @@ struct xsm_operations {
     int (*alloc_security_evtchn) (struct evtchn *chn);
     void (*free_security_evtchn) (struct evtchn *chn);
     char *(*show_security_evtchn) (struct domain *d, const struct evtchn *chn);
+    int (*init_hardware_domain) (struct domain *d);
 
     int (*get_pod_target) (struct domain *d);
     int (*set_pod_target) (struct domain *d);
@@ -91,6 +92,7 @@ struct xsm_operations {
     int (*memory_pin_page) (struct domain *d1, struct domain *d2, struct page_info *page);
     int (*add_to_physmap) (struct domain *d1, struct domain *d2);
     int (*remove_from_physmap) (struct domain *d1, struct domain *d2);
+    int (*map_gmfn_foreign) (struct domain *d, struct domain *t);
     int (*claim_pages) (struct domain *d);
 
     int (*console_io) (struct domain *d, int cmd);
@@ -165,9 +167,6 @@ struct xsm_operations {
     int (*unbind_pt_irq) (struct domain *d, struct xen_domctl_bind_pt_irq *bind);
     int (*ioport_permission) (struct domain *d, uint32_t s, uint32_t e, uint8_t allow);
     int (*ioport_mapping) (struct domain *d, uint32_t s, uint32_t e, uint8_t allow);
-#endif
-#ifdef CONFIG_ARM
-    int (*map_gmfn_foreign) (struct domain *d, struct domain *t);
 #endif
 };
 
@@ -311,6 +310,11 @@ static inline char *xsm_show_security_evtchn (struct domain *d, const struct evt
     return xsm_ops->show_security_evtchn(d, chn);
 }
 
+static inline int xsm_init_hardware_domain (xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->init_hardware_domain(d);
+}
+
 static inline int xsm_get_pod_target (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->get_pod_target(d);
@@ -352,6 +356,11 @@ static inline int xsm_add_to_physmap(xsm_default_t def, struct domain *d1, struc
 static inline int xsm_remove_from_physmap(xsm_default_t def, struct domain *d1, struct domain *d2)
 {
     return xsm_ops->remove_from_physmap(d1, d2);
+}
+
+static inline int xsm_map_gmfn_foreign (xsm_default_t def, struct domain *d, struct domain *t)
+{
+    return xsm_ops->map_gmfn_foreign(d, t);
 }
 
 static inline int xsm_claim_pages(xsm_default_t def, struct domain *d)
@@ -633,13 +642,6 @@ static inline int xsm_ioport_mapping (xsm_default_t def, struct domain *d, uint3
     return xsm_ops->ioport_mapping(d, s, e, allow);
 }
 #endif /* CONFIG_X86 */
-
-#ifdef CONFIG_ARM
-static inline int xsm_map_gmfn_foreign (xsm_default_t def, struct domain *d, struct domain *t)
-{
-    return xsm_ops->map_gmfn_foreign(d, t);
-}
-#endif /* CONFIG_ARM */
 
 #endif /* XSM_NO_WRAPPERS */
 

@@ -20,6 +20,7 @@
 #include <public/hvm/e820.h>
 #include <xen/types.h>
 #include <asm/e820.h>
+#include <asm/iocap.h>
 #include <asm/mm.h>
 #include <asm/paging.h>
 #include <asm/p2m.h>
@@ -589,6 +590,7 @@ int hvm_get_mem_pinned_cacheattr(
     uint32_t *type)
 {
     struct hvm_mem_pinned_cacheattr_range *range;
+    uint64_t mask = ~(uint64_t)0 << order;
     int rc = 0;
 
     *type = ~0;
@@ -601,15 +603,15 @@ int hvm_get_mem_pinned_cacheattr(
                               &d->arch.hvm_domain.pinned_cacheattr_ranges,
                               list )
     {
-        if ( (guest_fn >= range->start) &&
-             (guest_fn + (1UL << order) - 1 <= range->end) )
+        if ( ((guest_fn & mask) >= range->start) &&
+             ((guest_fn | ~mask) <= range->end) )
         {
             *type = range->type;
             rc = 1;
             break;
         }
-        if ( (guest_fn <= range->end) &&
-             (range->start <= guest_fn + (1UL << order) - 1) )
+        if ( ((guest_fn & mask) <= range->end) &&
+             (range->start <= (guest_fn | ~mask)) )
         {
             rc = -1;
             break;
@@ -648,7 +650,11 @@ int32_t hvm_set_mem_pinned_cacheattr(
             {
                 rcu_read_unlock(&pinned_cacheattr_rcu_lock);
                 list_del_rcu(&range->list);
+                type = range->type;
                 call_rcu(&range->rcu, free_pinned_cacheattr_entry);
+                p2m_memory_type_changed(d);
+                if ( type != PAT_TYPE_UNCACHABLE )
+                    flush_all(FLUSH_CACHE);
                 return 0;
             }
         rcu_read_unlock(&pinned_cacheattr_rcu_lock);
@@ -694,6 +700,9 @@ int32_t hvm_set_mem_pinned_cacheattr(
     range->type = type;
 
     list_add_rcu(&range->list, &d->arch.hvm_domain.pinned_cacheattr_ranges);
+    p2m_memory_type_changed(d);
+    if ( type != PAT_TYPE_WRBACK )
+        flush_all(FLUSH_CACHE);
 
     return 0;
 }
@@ -783,7 +792,10 @@ HVM_REGISTER_SAVE_RESTORE(MTRR, hvm_save_mtrr_msr, hvm_load_mtrr_msr,
 void memory_type_changed(struct domain *d)
 {
     if ( iommu_enabled && d->vcpu && d->vcpu[0] )
+    {
         p2m_memory_type_changed(d);
+        flush_all(FLUSH_CACHE);
+    }
 }
 
 int epte_get_entry_emt(struct domain *d, unsigned long gfn, mfn_t mfn,
@@ -810,21 +822,21 @@ int epte_get_entry_emt(struct domain *d, unsigned long gfn, mfn_t mfn,
         return -1;
     }
 
-    if ( !iommu_enabled ||
-         (rangeset_is_empty(d->iomem_caps) &&
-          rangeset_is_empty(d->arch.ioport_caps) &&
-          !has_arch_pdevs(d)) )
+    if ( !need_iommu(d) && !cache_flush_permitted(d) )
     {
         ASSERT(!direct_mmio ||
-               mfn_x(mfn) == d->arch.hvm_domain.vmx.apic_access_mfn);
+               !((mfn_x(mfn) ^ d->arch.hvm_domain.vmx.apic_access_mfn) >>
+                 order));
         *ipat = 1;
         return MTRR_TYPE_WRBACK;
     }
 
     if ( direct_mmio )
     {
-        if ( mfn_x(mfn) != d->arch.hvm_domain.vmx.apic_access_mfn )
+        if ( (mfn_x(mfn) ^ d->arch.hvm_domain.vmx.apic_access_mfn) >> order )
             return MTRR_TYPE_UNCACHABLE;
+        if ( order )
+            return -1;
         *ipat = 1;
         return MTRR_TYPE_WRBACK;
     }

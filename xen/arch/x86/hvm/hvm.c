@@ -258,15 +258,19 @@ int hvm_set_guest_pat(struct vcpu *v, u64 guest_pat)
     return 1;
 }
 
-void hvm_set_guest_tsc(struct vcpu *v, u64 guest_tsc)
+void hvm_set_guest_tsc_fixed(struct vcpu *v, u64 guest_tsc, u64 at_tsc)
 {
     uint64_t tsc;
     uint64_t delta_tsc;
 
     if ( v->domain->arch.vtsc )
     {
-        tsc = hvm_get_guest_time(v);
+        tsc = hvm_get_guest_time_fixed(v, at_tsc);
         tsc = gtime_to_gtsc(v->domain, tsc);
+    }
+    else if ( at_tsc )
+    {
+        tsc = at_tsc;
     }
     else
     {
@@ -278,26 +282,30 @@ void hvm_set_guest_tsc(struct vcpu *v, u64 guest_tsc)
                           - v->arch.hvm_vcpu.cache_tsc_offset;
     v->arch.hvm_vcpu.cache_tsc_offset = delta_tsc;
 
-    hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset);
+    hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset, at_tsc);
 }
 
 void hvm_set_guest_tsc_adjust(struct vcpu *v, u64 tsc_adjust)
 {
     v->arch.hvm_vcpu.cache_tsc_offset += tsc_adjust
                             - v->arch.hvm_vcpu.msr_tsc_adjust;
-    hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset);
+    hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset, 0);
     v->arch.hvm_vcpu.msr_tsc_adjust = tsc_adjust;
 }
 
-u64 hvm_get_guest_tsc(struct vcpu *v)
+u64 hvm_get_guest_tsc_fixed(struct vcpu *v, uint64_t at_tsc)
 {
     uint64_t tsc;
 
     if ( v->domain->arch.vtsc )
     {
-        tsc = hvm_get_guest_time(v);
+        tsc = hvm_get_guest_time_fixed(v, at_tsc);
         tsc = gtime_to_gtsc(v->domain, tsc);
         v->domain->arch.vtsc_kerncount++;
+    }
+    else if ( at_tsc )
+    {
+        tsc = at_tsc;
     }
     else
     {
@@ -488,7 +496,7 @@ static int hvm_set_ioreq_page(
 
     if ( (iorp->va != NULL) || d->is_dying )
     {
-        destroy_ring_for_helper(&iorp->va, iorp->page);
+        destroy_ring_for_helper(&va, page);
         spin_unlock(&iorp->lock);
         return -EINVAL;
     }
@@ -1690,7 +1698,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa,
         if ( access_w )
         {
             paging_mark_dirty(v->domain, mfn_x(mfn));
-            p2m_change_type(v->domain, gfn, p2m_ram_logdirty, p2m_ram_rw);
+            p2m_change_type_one(v->domain, gfn, p2m_ram_logdirty, p2m_ram_rw);
         }
         rc = 1;
         goto out_put_gfn;
@@ -1815,11 +1823,6 @@ static bool_t domain_exit_uc_mode(struct vcpu *v)
     return 1;
 }
 
-static void local_flush_cache(void *info)
-{
-    wbinvd();
-}
-
 static void hvm_set_uc_mode(struct vcpu *v, bool_t is_in_uc_mode)
 {
     v->domain->arch.hvm_domain.is_in_uc_mode = is_in_uc_mode;
@@ -1919,7 +1922,7 @@ void hvm_shadow_handle_cd(struct vcpu *v, unsigned long value)
             domain_pause_nosync(v->domain);
 
             /* Flush physical caches. */
-            on_each_cpu(local_flush_cache, NULL, 1);
+            flush_all(FLUSH_CACHE);
             hvm_set_uc_mode(v, 1);
 
             domain_unpause(v->domain);
@@ -2983,6 +2986,15 @@ unsigned long copy_from_user_hvm(void *to, const void *from, unsigned len)
     return rc ? len : 0; /* fake a copy_from_user() return code */
 }
 
+void hvm_hypervisor_cpuid_leaf(uint32_t sub_idx,
+                               uint32_t *eax, uint32_t *ebx,
+                               uint32_t *ecx, uint32_t *edx)
+{
+    *eax = *ebx = *ecx = *edx = 0;
+    if ( hvm_funcs.hypervisor_cpuid_leaf )
+        hvm_funcs.hypervisor_cpuid_leaf(sub_idx, eax, ebx, ecx, edx);
+}
+
 void hvm_cpuid(unsigned int input, unsigned int *eax, unsigned int *ebx,
                                    unsigned int *ecx, unsigned int *edx)
 {
@@ -3080,6 +3092,9 @@ void hvm_cpuid(unsigned int input, unsigned int *eax, unsigned int *ebx,
         /* Only provide PSE36 when guest runs in 32bit PAE or in long mode */
         if ( !(hvm_pae_enabled(v) || hvm_long_mode_enabled(v)) )
             *edx &= ~cpufeat_mask(X86_FEATURE_PSE36);
+        /* Hide data breakpoint extensions if the hardware has no support. */
+        if ( !boot_cpu_has(X86_FEATURE_DBEXT) )
+            *ecx &= ~cpufeat_mask(X86_FEATURE_DBEXT);
         break;
 
     case 0x80000008:
@@ -3840,7 +3855,8 @@ void hvm_vcpu_reset_state(struct vcpu *v, uint16_t cs, uint16_t ip)
     /* Sync AP's TSC with BSP's. */
     v->arch.hvm_vcpu.cache_tsc_offset =
         v->domain->vcpu[0]->arch.hvm_vcpu.cache_tsc_offset;
-    hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset);
+    hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset,
+                             d->arch.hvm_domain.sync_tsc);
 
     v->arch.hvm_vcpu.msr_tsc_adjust = 0;
 
@@ -4525,44 +4541,32 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
         {
             unsigned long pfn = a.first_pfn + start_iter;
             p2m_type_t t;
-            p2m_type_t nt;
-            mfn_t mfn;
-            mfn = get_gfn_unshare(d, pfn, &t);
+
+            get_gfn_unshare(d, pfn, &t);
             if ( p2m_is_paging(t) )
             {
                 put_gfn(d, pfn);
                 p2m_mem_paging_populate(d, pfn);
-                rc = -EINVAL;
+                rc = -EINVAL; /* XXX EAGAIN */
                 goto param_fail4;
             }
             if ( p2m_is_shared(t) )
             {
                 put_gfn(d, pfn);
-                rc = -EINVAL;
+                rc = -EINVAL; /* XXX EAGAIN */
                 goto param_fail4;
-            } 
-            if ( p2m_is_grant(t) )
+            }
+            if ( !p2m_is_ram(t) &&
+                 (!p2m_is_hole(t) || a.hvmmem_type != HVMMEM_mmio_dm) )
             {
                 put_gfn(d, pfn);
-                gdprintk(XENLOG_WARNING,
-                         "type for pfn %#lx changed to grant while "
-                         "we were working?\n", pfn);
                 goto param_fail4;
             }
-            else
-            {
-                nt = p2m_change_type(d, pfn, t, memtype[a.hvmmem_type]);
-                if ( nt != t )
-                {
-                    put_gfn(d, pfn);
-                    gdprintk(XENLOG_WARNING,
-                             "type of pfn %#lx changed from %d to %d while "
-                             "we were trying to change it to %d\n",
-                             pfn, t, nt, memtype[a.hvmmem_type]);
-                    goto param_fail4;
-                }
-            }
+
+            rc = p2m_change_type_one(d, pfn, t, memtype[a.hvmmem_type]);
             put_gfn(d, pfn);
+            if ( rc )
+                goto param_fail4;
 
             /* Check for continuation if it's not the last interation */
             if ( a.nr > ++start_iter && !(start_iter & HVMOP_op_mask) &&
@@ -4576,83 +4580,6 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
         rc = 0;
 
     param_fail4:
-        rcu_unlock_domain(d);
-        break;
-    }
-
-    case HVMOP_set_mem_access:
-    {
-        struct xen_hvm_set_mem_access a;
-        struct domain *d;
-
-        if ( copy_from_guest(&a, arg, 1) )
-            return -EFAULT;
-
-        rc = rcu_lock_remote_domain_by_id(a.domid, &d);
-        if ( rc != 0 )
-            return rc;
-
-        rc = -EINVAL;
-        if ( !is_hvm_domain(d) )
-            goto param_fail5;
-
-        rc = xsm_hvm_param(XSM_TARGET, d, op);
-        if ( rc )
-            goto param_fail5;
-
-        rc = -EINVAL;
-        if ( (a.first_pfn != ~0ull) &&
-             (a.nr < start_iter ||
-              ((a.first_pfn + a.nr - 1) < a.first_pfn) ||
-              ((a.first_pfn + a.nr - 1) > domain_get_maximum_gpfn(d))) )
-            goto param_fail5;
-            
-        rc = p2m_set_mem_access(d, a.first_pfn, a.nr, start_iter,
-                                HVMOP_op_mask, a.hvmmem_access);
-        if ( rc > 0 )
-        {
-            start_iter = rc;
-            rc = -EAGAIN;
-        }
-
-    param_fail5:
-        rcu_unlock_domain(d);
-        break;
-    }
-
-    case HVMOP_get_mem_access:
-    {
-        struct xen_hvm_get_mem_access a;
-        struct domain *d;
-        hvmmem_access_t access;
-
-        if ( copy_from_guest(&a, arg, 1) )
-            return -EFAULT;
-
-        rc = rcu_lock_remote_domain_by_id(a.domid, &d);
-        if ( rc != 0 )
-            return rc;
-
-        rc = -EINVAL;
-        if ( !is_hvm_domain(d) )
-            goto param_fail6;
-
-        rc = xsm_hvm_param(XSM_TARGET, d, op);
-        if ( rc )
-            goto param_fail6;
-
-        rc = -EINVAL;
-        if ( (a.pfn > domain_get_maximum_gpfn(d)) && a.pfn != ~0ull )
-            goto param_fail6;
-
-        rc = p2m_get_mem_access(d, a.pfn, &access);
-        if ( rc != 0 )
-            goto param_fail6;
-
-        a.hvmmem_access = access;
-        rc = __copy_to_guest(arg, &a, 1) ? -EFAULT : 0;
-
-    param_fail6:
         rcu_unlock_domain(d);
         break;
     }

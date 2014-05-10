@@ -65,4 +65,15 @@
 #define _XEN_CPUID_FEAT1_MMU_PT_UPDATE_PRESERVE_AD 0
 #define XEN_CPUID_FEAT1_MMU_PT_UPDATE_PRESERVE_AD  (1u<<0)
 
+/*
+ * Leaf 5 (0x40000004)
+ * HVM-specific features
+ */
+
+/* EAX Features */
+#define XEN_HVM_CPUID_APIC_ACCESS_VIRT (1u << 0) /* Virtualized APIC registers */
+#define XEN_HVM_CPUID_X2APIC_VIRT      (1u << 1) /* Virtualized x2APIC accesses */
+
+#define XEN_CPUID_MAX_NUM_LEAVES 4
+
 #endif /* __XEN_PUBLIC_ARCH_X86_CPUID_H__ */

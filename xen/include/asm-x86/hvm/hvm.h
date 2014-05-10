@@ -137,7 +137,7 @@ struct hvm_function_table {
     int  (*get_guest_pat)(struct vcpu *v, u64 *);
     int  (*set_guest_pat)(struct vcpu *v, u64);
 
-    void (*set_tsc_offset)(struct vcpu *v, u64 offset);
+    void (*set_tsc_offset)(struct vcpu *v, u64 offset, u64 at_tsc);
 
     void (*inject_trap)(struct hvm_trap *trap);
 
@@ -200,6 +200,10 @@ struct hvm_function_table {
                                 paddr_t *L1_gpa, unsigned int *page_order,
                                 uint8_t *p2m_acc, bool_t access_r,
                                 bool_t access_w, bool_t access_x);
+
+    void (*hypervisor_cpuid_leaf)(uint32_t sub_idx,
+                                  uint32_t *eax, uint32_t *ebx,
+                                  uint32_t *ecx, uint32_t *edx);
 };
 
 extern struct hvm_function_table hvm_funcs;
@@ -232,12 +236,15 @@ bool_t hvm_send_assist_req(struct vcpu *v);
 void hvm_get_guest_pat(struct vcpu *v, u64 *guest_pat);
 int hvm_set_guest_pat(struct vcpu *v, u64 guest_pat);
 
-void hvm_set_guest_tsc(struct vcpu *v, u64 guest_tsc);
-u64 hvm_get_guest_tsc(struct vcpu *v);
+void hvm_set_guest_tsc_fixed(struct vcpu *v, u64 guest_tsc, u64 at_tsc);
+#define hvm_set_guest_tsc(v, t) hvm_set_guest_tsc_fixed(v, t, 0)
+u64 hvm_get_guest_tsc_fixed(struct vcpu *v, u64 at_tsc);
+#define hvm_get_guest_tsc(v) hvm_get_guest_tsc_fixed(v, 0)
 
 void hvm_init_guest_time(struct domain *d);
 void hvm_set_guest_time(struct vcpu *v, u64 guest_time);
-u64 hvm_get_guest_time(struct vcpu *v);
+u64 hvm_get_guest_time_fixed(struct vcpu *v, u64 at_tsc);
+#define hvm_get_guest_time(v) hvm_get_guest_time_fixed(v, 0)
 
 int vmsi_deliver(
     struct domain *d, int vector,
@@ -336,6 +343,9 @@ static inline unsigned long hvm_get_shadow_gs_base(struct vcpu *v)
 #define is_viridian_domain(_d)                                             \
  (is_hvm_domain(_d) && ((_d)->arch.hvm_domain.params[HVM_PARAM_VIRIDIAN]))
 
+void hvm_hypervisor_cpuid_leaf(uint32_t sub_idx,
+                               uint32_t *eax, uint32_t *ebx,
+                               uint32_t *ecx, uint32_t *edx);
 void hvm_cpuid(unsigned int input, unsigned int *eax, unsigned int *ebx,
                                    unsigned int *ecx, unsigned int *edx);
 void hvm_migrate_timers(struct vcpu *v);
@@ -349,6 +359,19 @@ void hvm_inject_page_fault(int errcode, unsigned long cr2);
 static inline int hvm_event_pending(struct vcpu *v)
 {
     return hvm_funcs.event_pending(v);
+}
+
+static inline bool_t hvm_vcpu_has_smep(void)
+{
+    unsigned int eax, ebx;
+
+    hvm_cpuid(0, &eax, NULL, NULL, NULL);
+
+    if (eax < 7)
+        return 0;
+
+    hvm_cpuid(7, NULL, &ebx, NULL, NULL);
+    return !!(ebx & cpufeat_mask(X86_FEATURE_SMEP));
 }
 
 /* These reserved bits in lower 32 remain 0 after any load of CR0 */
@@ -370,7 +393,7 @@ static inline int hvm_event_pending(struct vcpu *v)
         X86_CR4_DE  | X86_CR4_PSE | X86_CR4_PAE |       \
         X86_CR4_MCE | X86_CR4_PGE | X86_CR4_PCE |       \
         X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT |           \
-        (cpu_has_smep ? X86_CR4_SMEP : 0) |             \
+        (hvm_vcpu_has_smep() ? X86_CR4_SMEP : 0) |      \
         (cpu_has_fsgsbase ? X86_CR4_FSGSBASE : 0) |     \
         ((nestedhvm_enabled((_v)->domain) && cpu_has_vmx)\
                       ? X86_CR4_VMXE : 0)  |             \

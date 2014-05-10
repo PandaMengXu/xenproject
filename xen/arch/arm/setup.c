@@ -719,8 +719,6 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     init_IRQ();
 
-    gic_route_ppis();
-    gic_route_spis();
     xsm_dt_init();
 
     init_maintenance_interrupt();
@@ -761,7 +759,7 @@ void __init start_xen(unsigned long boot_phys_offset,
     do_initcalls();
 
     /* Create initial domain 0. */
-    hardware_domain = dom0 = domain_create(0, 0, 0);
+    dom0 = domain_create(0, 0, 0);
     if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
             panic("Error creating domain 0");
 

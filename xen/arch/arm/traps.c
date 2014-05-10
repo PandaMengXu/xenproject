@@ -17,6 +17,7 @@
  */
 
 #include <xen/config.h>
+#include <xen/stdbool.h>
 #include <xen/init.h>
 #include <xen/string.h>
 #include <xen/version.h>
@@ -74,9 +75,22 @@ void __cpuinit init_traps(void)
     /* Setup Hyp vector base */
     WRITE_SYSREG((vaddr_t)hyp_traps_vector, VBAR_EL2);
 
+    /* Trap Debug and Performance Monitor accesses */
+    WRITE_SYSREG(HDCR_TDRA|HDCR_TDOSA|HDCR_TDA|HDCR_TPM|HDCR_TPMCR,
+                 MDCR_EL2);
+
+    /* Trap CP15 c15 used for implementation defined registers */
+    WRITE_SYSREG(HSTR_T(15), HSTR_EL2);
+
+    /* Trap all coprocessor registers (0-13) except cp10 and cp11 for VFP
+     * /!\ All processors except cp10 and cp11 cannot be used in Xen
+     */
+    WRITE_SYSREG((HCPTR_CP_MASK & ~(HCPTR_CP(10) | HCPTR_CP(11))) | HCPTR_TTA,
+                 CPTR_EL2);
+
     /* Setup hypervisor traps */
     WRITE_SYSREG(HCR_PTW|HCR_BSU_INNER|HCR_AMO|HCR_IMO|HCR_VM|HCR_TWI|HCR_TSC|
-                 HCR_TAC, HCR_EL2);
+                 HCR_TAC|HCR_SWIO|HCR_TIDCP, HCR_EL2);
     isb();
 }
 
@@ -1012,6 +1026,7 @@ static arm_hypercall_t arm_hypercall_table[] = {
     HYPERCALL(sysctl, 2),
     HYPERCALL(hvm_op, 2),
     HYPERCALL(grant_table_op, 3),
+    HYPERCALL(multicall, 2),
     HYPERCALL_ARM(vcpu_op, 3),
 };
 
@@ -1159,6 +1174,24 @@ static void do_trap_hypercall(struct cpu_user_regs *regs, register_t *nr,
 #endif
 }
 
+static bool_t check_multicall_32bit_clean(struct multicall_entry *multi)
+{
+    int i;
+
+    for ( i = 0; i < arm_hypercall_table[multi->op].nr_args; i++ )
+    {
+        if ( unlikely(multi->args[i] & 0xffffffff00000000ULL) )
+        {
+            printk("%pv: multicall argument %d is not 32-bit clean %"PRIx64"\n",
+                   current, i, multi->args[i]);
+            domain_crash(current->domain);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void do_multicall_call(struct multicall_entry *multi)
 {
     arm_hypercall_fn_t call = NULL;
@@ -1176,9 +1209,13 @@ void do_multicall_call(struct multicall_entry *multi)
         return;
     }
 
+    if ( is_32bit_domain(current->domain) &&
+         !check_multicall_32bit_clean(multi) )
+        return;
+
     multi->result = call(multi->args[0], multi->args[1],
-                        multi->args[2], multi->args[3],
-                        multi->args[4]);
+                         multi->args[2], multi->args[3],
+                         multi->args[4]);
 }
 
 /*
@@ -1351,10 +1388,16 @@ static void do_cp15_32(struct cpu_user_regs *regs,
            *r = v->arch.actlr;
         break;
     default:
-        printk("%s p15, %d, r%d, cr%d, cr%d, %d @ 0x%"PRIregister"\n",
-               cp32.read ? "mrc" : "mcr",
-               cp32.op1, cp32.reg, cp32.crn, cp32.crm, cp32.op2, regs->pc);
-        panic("unhandled 32-bit CP15 access %#x", hsr.bits & HSR_CP32_REGS_MASK);
+#ifndef NDEBUG
+        gdprintk(XENLOG_ERR,
+                 "%s p15, %d, r%d, cr%d, cr%d, %d @ 0x%"PRIregister"\n",
+                 cp32.read ? "mrc" : "mcr",
+                 cp32.op1, cp32.reg, cp32.crn, cp32.crm, cp32.op2, regs->pc);
+        gdprintk(XENLOG_ERR, "unhandled 32-bit CP15 access %#x\n",
+                 hsr.bits & HSR_CP32_REGS_MASK);
+#endif
+        inject_undef32_exception(regs);
+        return;
     }
     advance_pc(regs, hsr);
 }
@@ -1362,8 +1405,6 @@ static void do_cp15_32(struct cpu_user_regs *regs,
 static void do_cp15_64(struct cpu_user_regs *regs,
                        union hsr hsr)
 {
-    struct hsr_cp64 cp64 = hsr.cp64;
-
     if ( !check_conditional_instr(regs, hsr) )
     {
         advance_pc(regs, hsr);
@@ -1381,22 +1422,90 @@ static void do_cp15_64(struct cpu_user_regs *regs,
         }
         break;
     default:
-        printk("%s p15, %d, r%d, r%d, cr%d @ 0x%"PRIregister"\n",
-               cp64.read ? "mrrc" : "mcrr",
-               cp64.op1, cp64.reg1, cp64.reg2, cp64.crm, regs->pc);
-        panic("unhandled 64-bit CP15 access %#x", hsr.bits & HSR_CP64_REGS_MASK);
+        {
+#ifndef NDEBUG
+            struct hsr_cp64 cp64 = hsr.cp64;
+
+            gdprintk(XENLOG_ERR,
+                     "%s p15, %d, r%d, r%d, cr%d @ 0x%"PRIregister"\n",
+                     cp64.read ? "mrrc" : "mcrr",
+                     cp64.op1, cp64.reg1, cp64.reg2, cp64.crm, regs->pc);
+            gdprintk(XENLOG_ERR, "unhandled 64-bit CP15 access %#x\n",
+                     hsr.bits & HSR_CP64_REGS_MASK);
+#endif
+            inject_undef32_exception(regs);
+            return;
+        }
     }
     advance_pc(regs, hsr);
+}
+
+static void do_cp14(struct cpu_user_regs *regs, union hsr hsr)
+{
+    if ( !check_conditional_instr(regs, hsr) )
+    {
+        advance_pc(regs, hsr);
+        return;
+    }
+
+    inject_undef32_exception(regs);
+}
+
+static void do_cp(struct cpu_user_regs *regs, union hsr hsr)
+{
+    if ( !check_conditional_instr(regs, hsr) )
+    {
+        advance_pc(regs, hsr);
+        return;
+    }
+
+    inject_undef32_exception(regs);
 }
 
 #ifdef CONFIG_ARM_64
 static void do_sysreg(struct cpu_user_regs *regs,
                       union hsr hsr)
 {
-    struct hsr_sysreg sysreg = hsr.sysreg;
+    register_t *x = select_user_reg(regs, hsr.sysreg.reg);
 
     switch ( hsr.bits & HSR_SYSREG_REGS_MASK )
     {
+    /* RAZ/WI registers: */
+    /*  - Debug */
+    case HSR_SYSREG_MDSCR_EL1:
+    /*  - Perf monitors */
+    case HSR_SYSREG_PMINTENSET_EL1:
+    case HSR_SYSREG_PMINTENCLR_EL1:
+    case HSR_SYSREG_PMCR_EL0:
+    case HSR_SYSREG_PMCNTENSET_EL0:
+    case HSR_SYSREG_PMCNTENCLR_EL0:
+    case HSR_SYSREG_PMOVSCLR_EL0:
+    case HSR_SYSREG_PMSWINC_EL0:
+    case HSR_SYSREG_PMSELR_EL0:
+    case HSR_SYSREG_PMCEID0_EL0:
+    case HSR_SYSREG_PMCEID1_EL0:
+    case HSR_SYSREG_PMCCNTR_EL0:
+    case HSR_SYSREG_PMXEVTYPER_EL0:
+    case HSR_SYSREG_PMXEVCNTR_EL0:
+    case HSR_SYSREG_PMUSERENR_EL0:
+    case HSR_SYSREG_PMOVSSET_EL0:
+    /* - Breakpoints */
+    HSR_SYSREG_DBG_CASES(DBGBVR):
+    HSR_SYSREG_DBG_CASES(DBGBCR):
+    /* -  Watchpoints */
+    HSR_SYSREG_DBG_CASES(DBGWVR):
+    HSR_SYSREG_DBG_CASES(DBGWCR):
+        if ( hsr.sysreg.read )
+            *x = 0;
+        /* else: write ignored */
+        break;
+
+    /* Write only, Write ignore registers: */
+    case HSR_SYSREG_OSLAR_EL1:
+        if ( hsr.sysreg.read )
+            goto bad_sysreg;
+        /* else: write ignored */
+        break;
     case HSR_SYSREG_CNTP_CTL_EL0:
     case HSR_SYSREG_CNTP_TVAL_EL0:
         if ( !vtimer_emulate(regs, hsr) )
@@ -1407,15 +1516,24 @@ static void do_sysreg(struct cpu_user_regs *regs,
         }
         break;
     default:
-        printk("%s %d, %d, c%d, c%d, %d %s x%d @ 0x%"PRIregister"\n",
-               sysreg.read ? "mrs" : "msr",
-               sysreg.op0, sysreg.op1,
-               sysreg.crn, sysreg.crm,
-               sysreg.op2,
-               sysreg.read ? "=>" : "<=",
-               sysreg.reg, regs->pc);
-        panic("unhandled 64-bit sysreg access %#x",
-              hsr.bits & HSR_SYSREG_REGS_MASK);
+ bad_sysreg:
+        {
+            struct hsr_sysreg sysreg = hsr.sysreg;
+#ifndef NDEBUG
+
+            gdprintk(XENLOG_ERR,
+                     "%s %d, %d, c%d, c%d, %d %s x%d @ 0x%"PRIregister"\n",
+                     sysreg.read ? "mrs" : "msr",
+                     sysreg.op0, sysreg.op1,
+                     sysreg.crn, sysreg.crm,
+                     sysreg.op2,
+                     sysreg.read ? "=>" : "<=",
+                     sysreg.reg, regs->pc);
+            gdprintk(XENLOG_ERR, "unhandled 64-bit sysreg access %#x\n",
+                     hsr.bits & HSR_SYSREG_REGS_MASK);
+#endif
+            inject_undef64_exception(regs, sysreg.len);
+        }
     }
 
     regs->pc += 4;
@@ -1573,6 +1691,17 @@ asmlinkage void do_trap_hypervisor(struct cpu_user_regs *regs)
             goto bad_trap;
         do_cp15_64(regs, hsr);
         break;
+    case HSR_EC_CP14_32:
+    case HSR_EC_CP14_DBG:
+        if ( !is_32bit_domain(current->domain) )
+            goto bad_trap;
+        do_cp14(regs, hsr);
+        break;
+    case HSR_EC_CP:
+        if ( !is_32bit_domain(current->domain) )
+            goto bad_trap;
+        do_cp(regs, hsr);
+        break;
     case HSR_EC_SMC32:
         inject_undef32_exception(regs);
         break;
@@ -1613,7 +1742,7 @@ asmlinkage void do_trap_hypervisor(struct cpu_user_regs *regs)
         break;
     default:
  bad_trap:
-        printk("Hypervisor Trap. HSR=0x%x EC=0x%x IL=%x Syndrome=%"PRIx32"\n",
+        printk("Hypervisor Trap. HSR=0x%x EC=0x%x IL=%x Syndrome=0x%"PRIx32"\n",
                hsr.bits, hsr.ec, hsr.len, hsr.iss);
         do_unexpected_trap("Hypervisor", regs);
     }

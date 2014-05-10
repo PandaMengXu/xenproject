@@ -15,6 +15,7 @@
 #include <xen/init.h>
 #include <xen/string.h>
 #include <xen/types.h>
+#include <xen/stdbool.h>
 
 #define DEVICE_TREE_MAX_DEPTH 16
 
@@ -110,6 +111,13 @@ struct dt_device_node {
     struct dt_device_node *next; /* TODO: Remove it. Only use to know the last children */
     struct dt_device_node *allnext;
 
+};
+
+#define MAX_PHANDLE_ARGS 16
+struct dt_phandle_args {
+    struct dt_device_node *np;
+    int args_count;
+    uint32_t args[MAX_PHANDLE_ARGS];
 };
 
 /**
@@ -348,6 +356,10 @@ struct dt_device_node *dt_find_compatible_node(struct dt_device_node *from,
 const void *dt_get_property(const struct dt_device_node *np,
                             const char *name, u32 *lenp);
 
+const struct dt_property *dt_find_property(const struct dt_device_node *np,
+                                           const char *name, u32 *lenp);
+
+
 /**
  * dt_property_read_u32 - Helper to read a u32 property.
  * @np: node to get the value
@@ -368,6 +380,22 @@ bool_t dt_property_read_u32(const struct dt_device_node *np,
  */
 bool_t dt_property_read_u64(const struct dt_device_node *np,
                             const char *name, u64 *out_value);
+
+/**
+ * dt_property_read_bool - Check if a property exists
+ * @np: node to get the value
+ * @name: name of the property
+ *
+ * Search for a property in a device node.
+ * Return true if the property exists false otherwise.
+ */
+static inline bool_t dt_property_read_bool(const struct dt_device_node *np,
+                                           const char *name)
+{
+    const struct dt_property *prop = dt_find_property(np, name, NULL);
+
+    return prop ? true : false;
+}
 
 /**
  * dt_property_read_string - Find and read a string from a property
@@ -600,6 +628,53 @@ void dt_set_range(__be32 **cellp, const struct dt_device_node *np,
  */
 void dt_get_range(const __be32 **cellp, const struct dt_device_node *np,
                   u64 *address, u64 *size);
+
+/**
+ * dt_parse_phandle - Resolve a phandle property to a device_node pointer
+ * @np: Pointer to device node holding phandle property
+ * @phandle_name: Name of property holding a phandle value
+ * @index: For properties holding a table of phandles, this is the index into
+ *         the table
+ *
+ * Returns the device_node pointer.
+ */
+struct dt_device_node *dt_parse_phandle(const struct dt_device_node *np,
+				                        const char *phandle_name,
+                                        int index);
+
+/**
+ * dt_parse_phandle_with_args() - Find a node pointed by phandle in a list
+ * @np:	pointer to a device tree node containing a list
+ * @list_name: property name that contains a list
+ * @cells_name: property name that specifies phandles' arguments count
+ * @index: index of a phandle to parse out
+ * @out_args: optional pointer to output arguments structure (will be filled)
+ *
+ * This function is useful to parse lists of phandles and their arguments.
+ * Returns 0 on success and fills out_args, on error returns appropriate
+ * errno value.
+ *
+ * Example:
+ *
+ * phandle1: node1 {
+ * 	#list-cells = <2>;
+ * }
+ *
+ * phandle2: node2 {
+ * 	#list-cells = <1>;
+ * }
+ *
+ * node3 {
+ * 	list = <&phandle1 1 2 &phandle2 3>;
+ * }
+ *
+ * To get a device_node of the `node2' node you may call this:
+ * dt_parse_phandle_with_args(node3, "list", "#list-cells", 1, &args);
+ */
+int dt_parse_phandle_with_args(const struct dt_device_node *np,
+                               const char *list_name,
+                               const char *cells_name, int index,
+                               struct dt_phandle_args *out_args);
 
 #endif /* __XEN_DEVICE_TREE_H */
 

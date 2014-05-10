@@ -14,8 +14,7 @@ struct arch_pirq
 {
 };
 
-struct irq_cfg {
-#define arch_irq_desc irq_cfg
+struct arch_irq_desc {
     int eoi_cpu;
 };
 
@@ -40,10 +39,13 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq);
 void init_IRQ(void);
 void init_secondary_IRQ(void);
 
-int __init request_dt_irq(const struct dt_irq *irq,
-                          void (*handler)(int, void *, struct cpu_user_regs *),
-                          const char *devname, void *dev_id);
-int __init setup_dt_irq(const struct dt_irq *irq, struct irqaction *new);
+int request_dt_irq(const struct dt_irq *irq,
+                   void (*handler)(int, void *, struct cpu_user_regs *),
+                   const char *devname, void *dev_id);
+int setup_dt_irq(const struct dt_irq *irq, struct irqaction *new);
+
+int route_dt_irq_to_guest(struct domain *d, const struct dt_irq *irq,
+                          const char *devname);
 
 #endif /* _ASM_HW_IRQ_H */
 /*

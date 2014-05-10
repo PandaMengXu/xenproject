@@ -115,6 +115,9 @@
 #define NSACR           p15,0,c1,c1,2   /* Non-Secure Access Control Register */
 #define HSCTLR          p15,4,c1,c0,0   /* Hyp. System Control Register */
 #define HCR             p15,4,c1,c1,0   /* Hyp. Configuration Register */
+#define HDCR            p15,4,c1,c1,1   /* Hyp. Debug Configuration Register */
+#define HCPTR           p15,4,c1,c1,2   /* Hyp. Coprocessor Trap Register */
+#define HSTR            p15,4,c1,c1,3   /* Hyp. System Trap Register */
 
 /* CP15 CR2: Translation Table Base and Control Registers */
 #define TTBCR           p15,0,c2,c0,2   /* Translatation Table Base Control Register */
@@ -260,6 +263,7 @@
 #define CNTV_CVAL_EL0           CNTV_CVAL
 #define CONTEXTIDR_EL1          CONTEXTIDR
 #define CPACR_EL1               CPACR
+#define CPTR_EL2                HCPTR
 #define CSSELR_EL1              CSSELR
 #define DACR32_EL2              DACR
 #define ESR_EL1                 DFSR
@@ -268,6 +272,7 @@
 #define FAR_EL2                 HIFAR
 #define HCR_EL2                 HCR
 #define HPFAR_EL2               HPFAR
+#define HSTR_EL2                HSTR
 #define ID_AFR0_EL1             ID_AFR0
 #define ID_DFR0_EL1             ID_DFR0
 #define ID_ISAR0_EL1            ID_ISAR0
@@ -283,6 +288,7 @@
 #define ID_PFR0_EL1             ID_PFR0
 #define ID_PFR1_EL1             ID_PFR1
 #define IFSR32_EL2              IFSR
+#define MDCR_EL2                HDCR
 #define MIDR_EL1                MIDR
 #define MPIDR_EL1               MPIDR
 #define PAR_EL1                 PAR

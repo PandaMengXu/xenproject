@@ -75,31 +75,35 @@
     ((timer_config(h, n) & HPET_TN_INT_ROUTE_CAP_MASK) \
         >> HPET_TN_INT_ROUTE_CAP_SHIFT)
 
-static inline uint64_t hpet_read_maincounter(HPETState *h)
+static inline uint64_t hpet_read_maincounter(HPETState *h, uint64_t guest_time)
 {
     ASSERT(spin_is_locked(&h->lock));
 
     if ( hpet_enabled(h) )
-        return guest_time_hpet(h) + h->mc_offset;
+        return guest_time + h->mc_offset;
     else
         return h->hpet.mc64;
 }
 
-static uint64_t hpet_get_comparator(HPETState *h, unsigned int tn)
+static uint64_t hpet_get_comparator(HPETState *h, unsigned int tn,
+                                    uint64_t guest_time)
 {
     uint64_t comparator;
     uint64_t elapsed;
 
     comparator = h->hpet.comparator64[tn];
-    if ( timer_is_periodic(h, tn) )
+    if ( hpet_enabled(h) && timer_is_periodic(h, tn) )
     {
         /* update comparator by number of periods elapsed since last update */
         uint64_t period = h->hpet.period[tn];
         if (period)
         {
-            elapsed = hpet_read_maincounter(h) + period - 1 - comparator;
-            comparator += (elapsed / period) * period;
-            h->hpet.comparator64[tn] = comparator;
+            elapsed = hpet_read_maincounter(h, guest_time) - comparator;
+            if ( (int64_t)elapsed >= 0 )
+            {
+                comparator += ((elapsed + period) / period) * period;
+                h->hpet.comparator64[tn] = comparator;
+            }
         }
     }
 
@@ -109,7 +113,8 @@ static uint64_t hpet_get_comparator(HPETState *h, unsigned int tn)
     h->hpet.timers[tn].cmp = comparator;
     return comparator;
 }
-static inline uint64_t hpet_read64(HPETState *h, unsigned long addr)
+static inline uint64_t hpet_read64(HPETState *h, unsigned long addr,
+                                   uint64_t guest_time)
 {
     addr &= ~7;
 
@@ -122,7 +127,7 @@ static inline uint64_t hpet_read64(HPETState *h, unsigned long addr)
     case HPET_STATUS:
         return h->hpet.isr;
     case HPET_COUNTER:
-        return hpet_read_maincounter(h);
+        return hpet_read_maincounter(h, guest_time);
     case HPET_Tn_CFG(0):
     case HPET_Tn_CFG(1):
     case HPET_Tn_CFG(2):
@@ -130,7 +135,7 @@ static inline uint64_t hpet_read64(HPETState *h, unsigned long addr)
     case HPET_Tn_CMP(0):
     case HPET_Tn_CMP(1):
     case HPET_Tn_CMP(2):
-        return hpet_get_comparator(h, HPET_TN(CMP, addr));
+        return hpet_get_comparator(h, HPET_TN(CMP, addr), guest_time);
     case HPET_Tn_ROUTE(0):
     case HPET_Tn_ROUTE(1):
     case HPET_Tn_ROUTE(2):
@@ -176,7 +181,7 @@ static int hpet_read(
 
     spin_lock(&h->lock);
 
-    val = hpet_read64(h, addr);
+    val = hpet_read64(h, addr, guest_time_hpet(h));
 
     result = val;
     if ( length != 8 )
@@ -189,7 +194,8 @@ static int hpet_read(
     return X86EMUL_OKAY;
 }
 
-static void hpet_stop_timer(HPETState *h, unsigned int tn)
+static void hpet_stop_timer(HPETState *h, unsigned int tn,
+                            uint64_t guest_time)
 {
     ASSERT(tn < HPET_TIMER_NUM);
     ASSERT(spin_is_locked(&h->lock));
@@ -197,14 +203,15 @@ static void hpet_stop_timer(HPETState *h, unsigned int tn)
     destroy_periodic_time(&h->pt[tn]);
     /* read the comparator to get it updated so a read while stopped will
      * return the expected value. */
-    hpet_get_comparator(h, tn);
+    hpet_get_comparator(h, tn, guest_time);
 }
 
 /* the number of HPET tick that stands for
  * 1/(2^10) second, namely, 0.9765625 milliseconds */
 #define  HPET_TINY_TIME_SPAN  ((h->stime_freq >> 10) / STIME_PER_HPET_TICK)
 
-static void hpet_set_timer(HPETState *h, unsigned int tn)
+static void hpet_set_timer(HPETState *h, unsigned int tn,
+                           uint64_t guest_time)
 {
     uint64_t tn_cmp, cur_tick, diff;
     unsigned int irq;
@@ -223,8 +230,8 @@ static void hpet_set_timer(HPETState *h, unsigned int tn)
     if ( !timer_enabled(h, tn) )
         return;
 
-    tn_cmp   = hpet_get_comparator(h, tn);
-    cur_tick = hpet_read_maincounter(h);
+    tn_cmp   = hpet_get_comparator(h, tn, guest_time);
+    cur_tick = hpet_read_maincounter(h, guest_time);
     if ( timer_is_32bit(h, tn) )
     {
         tn_cmp   = (uint32_t)tn_cmp;
@@ -282,6 +289,7 @@ static int hpet_write(
 {
     HPETState *h = vcpu_vhpet(v);
     uint64_t old_val, new_val;
+    uint64_t guest_time;
     int tn, i;
 
     /* Acculumate a bit mask of timers whos state is changed by this write. */
@@ -298,7 +306,8 @@ static int hpet_write(
 
     spin_lock(&h->lock);
 
-    old_val = hpet_read64(h, addr);
+    guest_time = guest_time_hpet(h);
+    old_val = hpet_read64(h, addr, guest_time);
     new_val = val;
     if ( length != 8 )
         new_val = hpet_fixup_reg(
@@ -313,7 +322,7 @@ static int hpet_write(
         if ( !(old_val & HPET_CFG_ENABLE) && (new_val & HPET_CFG_ENABLE) )
         {
             /* Enable main counter and interrupt generation. */
-            h->mc_offset = h->hpet.mc64 - guest_time_hpet(h);
+            h->mc_offset = h->hpet.mc64 - guest_time;
             for ( i = 0; i < HPET_TIMER_NUM; i++ )
             {
                 h->hpet.comparator64[i] =
@@ -327,7 +336,7 @@ static int hpet_write(
         else if ( (old_val & HPET_CFG_ENABLE) && !(new_val & HPET_CFG_ENABLE) )
         {
             /* Halt main counter and disable interrupt generation. */
-            h->hpet.mc64 = h->mc_offset + guest_time_hpet(h);
+            h->hpet.mc64 = h->mc_offset + guest_time;
             for ( i = 0; i < HPET_TIMER_NUM; i++ )
                 if ( timer_enabled(h, i) )
                     set_stop_timer(i);
@@ -394,21 +403,11 @@ static int hpet_write(
     case HPET_Tn_CMP(1):
     case HPET_Tn_CMP(2):
         tn = HPET_TN(CMP, addr);
-        if ( timer_is_32bit(h, tn) )
-            new_val = (uint32_t)new_val;
-        h->hpet.timers[tn].cmp = new_val;
-        if ( h->hpet.timers[tn].config & HPET_TN_SETVAL )
-            /*
-             * When SETVAL is one, software is able to "directly set a periodic
-             * timer's accumulator."  That is, set the comparator without
-             * adjusting the period.  Much the same as just setting the
-             * comparator on an enabled one-shot timer.
-             *
-             * This configuration bit clears when the comparator is written.
-             */
-            h->hpet.timers[tn].config &= ~HPET_TN_SETVAL;
-        else if ( timer_is_periodic(h, tn) )
+        if ( timer_is_periodic(h, tn) &&
+             !(h->hpet.timers[tn].config & HPET_TN_SETVAL) )
         {
+            uint64_t max_period = (timer_is_32bit(h, tn) ? ~0u : ~0ull) >> 1;
+
             /*
              * Clamp period to reasonable min/max values:
              *  - minimum is 100us, same as timers controlled by vpt.c
@@ -416,10 +415,29 @@ static int hpet_write(
              */
             if ( hpet_tick_to_ns(h, new_val) < MICROSECS(100) )
                 new_val = (MICROSECS(100) << 10) / h->hpet_to_ns_scale;
-            new_val &= (timer_is_32bit(h, tn) ? ~0u : ~0ull) >> 1;
+            if ( new_val > max_period )
+                new_val = max_period;
             h->hpet.period[tn] = new_val;
         }
-        h->hpet.comparator64[tn] = new_val;
+        else
+        {
+            /*
+             * When SETVAL is one, software is able to "directly set
+             * a periodic timer's accumulator."  That is, set the
+             * comparator without adjusting the period.  Much the
+             * same as just setting the comparator on an enabled
+             * one-shot timer.
+             *
+             * This configuration bit clears when the comparator is
+             * written.
+             */
+            h->hpet.timers[tn].config &= ~HPET_TN_SETVAL;
+            h->hpet.comparator64[tn] = new_val;
+            /* truncate if timer is in 32 bit mode */
+            if ( timer_is_32bit(h, tn) )
+                new_val = (uint32_t)new_val;
+            h->hpet.timers[tn].cmp = new_val;
+        }
         if ( hpet_enabled(h) && timer_enabled(h, tn) )
             set_restart_timer(tn);
         break;
@@ -441,14 +459,14 @@ static int hpet_write(
     {
         i = find_first_set_bit(stop_timers);
         __clear_bit(i, &stop_timers);
-        hpet_stop_timer(h, i);
+        hpet_stop_timer(h, i, guest_time);
     }
 
     while (start_timers)
     {
         i = find_first_set_bit(start_timers);
         __clear_bit(i, &start_timers);
-        hpet_set_timer(h, i);
+        hpet_set_timer(h, i, guest_time);
     }
 
 #undef set_stop_timer
@@ -479,11 +497,14 @@ static int hpet_save(struct domain *d, hvm_domain_context_t *h)
 {
     HPETState *hp = domain_vhpet(d);
     int rc;
+    uint64_t guest_time;
 
     spin_lock(&hp->lock);
+    guest_time = guest_time_hpet(hp);
 
     /* Write the proper value into the main counter */
-    hp->hpet.mc64 = hp->mc_offset + guest_time_hpet(hp);
+    if ( hpet_enabled(hp) )
+        hp->hpet.mc64 = hp->mc_offset + guest_time;
 
     /* Save the HPET registers */
     rc = _hvm_init_entry(h, HVM_SAVE_CODE(HPET), 0, HVM_SAVE_LENGTH(HPET));
@@ -507,8 +528,18 @@ static int hpet_save(struct domain *d, hvm_domain_context_t *h)
         C(period[1]);
         C(period[2]);
 #undef C
-        /* save the 64 bit comparator in the 64 bit timer[n].cmp field
-         * regardless of whether or not the timer is in 32 bit mode. */
+        /*
+         * read the comparator to get it updated so hpet_save will
+         * return the expected value.
+         */
+        hpet_get_comparator(hp, 0, guest_time);
+        hpet_get_comparator(hp, 1, guest_time);
+        hpet_get_comparator(hp, 2, guest_time);
+        /*
+         * save the 64 bit comparator in the 64 bit timer[n].cmp
+         * field regardless of whether or not the timer is in 32 bit
+         * mode.
+         */
         rec->timers[0].cmp = hp->hpet.comparator64[0];
         rec->timers[1].cmp = hp->hpet.comparator64[1];
         rec->timers[2].cmp = hp->hpet.comparator64[2];
@@ -524,6 +555,7 @@ static int hpet_load(struct domain *d, hvm_domain_context_t *h)
     HPETState *hp = domain_vhpet(d);
     struct hvm_hw_hpet *rec;
     uint64_t cmp;
+    uint64_t guest_time;
     int i;
 
     spin_lock(&hp->lock);
@@ -562,14 +594,15 @@ static int hpet_load(struct domain *d, hvm_domain_context_t *h)
 #undef C
 
     /* Recalculate the offset between the main counter and guest time */
-    hp->mc_offset = hp->hpet.mc64 - guest_time_hpet(hp);
+    guest_time = guest_time_hpet(hp);
+    hp->mc_offset = hp->hpet.mc64 - guest_time;
 
     /* restart all timers */
 
     if ( hpet_enabled(hp) )
         for ( i = 0; i < HPET_TIMER_NUM; i++ )
             if ( timer_enabled(hp, i) )
-                hpet_set_timer(hp, i);
+                hpet_set_timer(hp, i, guest_time);
 
     spin_unlock(&hp->lock);
 
@@ -605,6 +638,7 @@ void hpet_init(struct vcpu *v)
         h->hpet.timers[i].config =
             HPET_TN_INT_ROUTE_CAP | HPET_TN_64BIT_CAP | HPET_TN_PERIODIC_CAP;
         h->hpet.timers[i].cmp = ~0ULL;
+        h->hpet.comparator64[i] = ~0ULL;
         h->pt[i].source = PTSRC_isa;
     }
 }
@@ -617,9 +651,13 @@ void hpet_deinit(struct domain *d)
     spin_lock(&h->lock);
 
     if ( hpet_enabled(h) )
+    {
+        uint64_t guest_time = guest_time_hpet(h);
+
         for ( i = 0; i < HPET_TIMER_NUM; i++ )
             if ( timer_enabled(h, i) )
-                hpet_stop_timer(h, i);
+                hpet_stop_timer(h, i, guest_time);
+    }
 
     spin_unlock(&h->lock);
 }

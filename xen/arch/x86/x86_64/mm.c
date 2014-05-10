@@ -25,6 +25,7 @@
 #include <xen/numa.h>
 #include <xen/nodemask.h>
 #include <xen/guest_access.h>
+#include <xen/hypercall.h>
 #include <asm/current.h>
 #include <asm/asm_defns.h>
 #include <asm/page.h>
@@ -36,6 +37,7 @@
 #include <asm/numa.h>
 #include <asm/mem_event.h>
 #include <asm/mem_sharing.h>
+#include <asm/mem_access.h>
 #include <public/memory.h>
 
 /* Parameters for PFN/MADDR compression. */
@@ -948,15 +950,16 @@ void __init subarch_init_memory(void)
     }
 }
 
-long subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg)
+long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     struct xen_machphys_mfn_list xmml;
     l3_pgentry_t l3e;
     l2_pgentry_t l2e;
-    unsigned long v;
+    unsigned long v, limit;
     xen_pfn_t mfn, last_mfn;
     unsigned int i;
     long rc = 0;
+    int op = cmd & MEMOP_CMD_MASK;
     rdmsr_op_t rdmsr_op_var;
     wrmsr_op_t wrmsr_op_var;
 
@@ -1008,6 +1011,34 @@ long subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         break;
 
+    case XENMEM_machphys_compat_mfn_list:
+        if ( copy_from_guest(&xmml, arg, 1) )
+            return -EFAULT;
+
+        limit = (unsigned long)(compat_machine_to_phys_mapping + max_page);
+        if ( limit > RDWR_COMPAT_MPT_VIRT_END )
+            limit = RDWR_COMPAT_MPT_VIRT_END;
+        for ( i = 0, v = RDWR_COMPAT_MPT_VIRT_START, last_mfn = 0;
+              (i != xmml.max_extents) && (v < limit);
+              i++, v += 1 << L2_PAGETABLE_SHIFT )
+        {
+            l2e = compat_idle_pg_table_l2[l2_table_offset(v)];
+            if ( l2e_get_flags(l2e) & _PAGE_PRESENT )
+                mfn = l2e_get_pfn(l2e);
+            else
+                mfn = last_mfn;
+            ASSERT(mfn);
+            if ( copy_to_guest_offset(xmml.extent_start, i, &mfn, 1) )
+                return -EFAULT;
+            last_mfn = mfn;
+        }
+
+        xmml.nr_extents = i;
+        if ( __copy_to_guest(arg, &xmml, 1) )
+            rc = -EFAULT;
+
+        break;
+
     case XENMEM_get_sharing_freed_pages:
         return mem_sharing_get_nr_saved_mfns();
 
@@ -1015,7 +1046,6 @@ long subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg)
         return mem_sharing_get_nr_shared_mfns();
 
     case XENMEM_paging_op:
-    case XENMEM_access_op:
     {
         xen_mem_event_op_t meo;
         if ( copy_from_guest(&meo, arg, 1) )
@@ -1025,6 +1055,11 @@ long subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg)
             return -EFAULT;
         break;
     }
+
+    case XENMEM_access_op:
+        rc = mem_access_memop(cmd, guest_handle_cast(arg, xen_mem_access_op_t));
+        break;
+
     case XENMEM_sharing_op:
     {
         xen_mem_sharing_op_t mso;

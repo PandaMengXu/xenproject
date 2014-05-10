@@ -38,6 +38,7 @@ SUBDIRS-$(CONFIG_X86) += xenpaging
 SUBDIRS-$(CONFIG_X86) += debugger/gdbsx
 SUBDIRS-$(CONFIG_X86) += debugger/kdd
 SUBDIRS-$(CONFIG_TESTS) += tests
+SUBDIRS-$(CONFIG_VTPM) += vtpmmgr
 
 # These don't cross-compile
 ifeq ($(XEN_COMPILE_ARCH),$(XEN_TARGET_ARCH))
@@ -62,7 +63,6 @@ install: subdirs-install
 	$(INSTALL_DIR) $(DESTDIR)/var/xen/dump
 	$(INSTALL_DIR) $(DESTDIR)/var/log/xen
 	$(INSTALL_DIR) $(DESTDIR)/var/lib/xen
-	$(INSTALL_DIR) $(DESTDIR)/var/lock/subsys
 
 .PHONY: uninstall
 uninstall: D=$(DESTDIR)

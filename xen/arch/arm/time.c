@@ -50,11 +50,11 @@ unsigned long __read_mostly cpu_khz;  /* CPU clock frequency in kHz. */
 
 static struct dt_irq timer_irq[MAX_TIMER_PPI];
 
-const struct dt_irq *timer_dt_irq(enum timer_ppi ppi)
+unsigned int timer_get_irq(enum timer_ppi ppi)
 {
     ASSERT(ppi >= TIMER_PHYS_SECURE_PPI && ppi < MAX_TIMER_PPI);
 
-    return &timer_irq[ppi];
+    return timer_irq[ppi].irq;
 }
 
 /*static inline*/ s_time_t ticks_to_ns(uint64_t ticks)
@@ -218,23 +218,11 @@ static void vtimer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
     vgic_vcpu_inject_irq(current, current->arch.virt_timer.irq, 1);
 }
 
-/* Route timer's IRQ on this CPU */
-void __cpuinit route_timer_interrupt(void)
-{
-    gic_route_dt_irq(&timer_irq[TIMER_PHYS_NONSECURE_PPI],
-                     cpumask_of(smp_processor_id()), GIC_PRI_IRQ);
-    gic_route_dt_irq(&timer_irq[TIMER_HYP_PPI],
-                     cpumask_of(smp_processor_id()), GIC_PRI_IRQ);
-    gic_route_dt_irq(&timer_irq[TIMER_VIRT_PPI],
-                     cpumask_of(smp_processor_id()), GIC_PRI_IRQ);
-}
-
 /* Set up the timer interrupt on this CPU */
 void __cpuinit init_timer_interrupt(void)
 {
     /* Sensible defaults */
     WRITE_SYSREG64(0, CNTVOFF_EL2);     /* No VM-specific offset */
-    WRITE_SYSREG32(0, CNTKCTL_EL1);     /* No user-mode access */
 #if USE_HYP_TIMER
     /* Do not let the VMs program the physical timer, only read the physical counter */
     WRITE_SYSREG32(CNTHCTL_PA, CNTHCTL_EL2);

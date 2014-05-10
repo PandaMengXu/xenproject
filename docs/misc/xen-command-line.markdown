@@ -545,6 +545,22 @@ versa.  For example to change dom0 without changing domU, use
 
 Specify the font size when using the VESA console driver.
 
+### force-ept (Intel)
+> `= <boolean>`
+
+> Default: `false`
+
+Allow EPT to be enabled when VMX feature VM\_ENTRY\_LOAD\_GUEST\_PAT is not
+present.
+
+*Warning:*
+Due to CVE-2013-2212, VMX feature VM\_ENTRY\_LOAD\_GUEST\_PAT is by default
+required as a prerequisite for using EPT.  If you are not using PCI Passthrough,
+or trust the guest administrator who would be using passthrough, then the
+requirement can be relaxed.  This option is particularly useful for nested
+virtualization, to allow the L1 hypervisor to use EPT even if the L0 hypervisor
+does not provide VM\_ENTRY\_LOAD\_GUEST\_PAT.
+
 ### gdb
 > `= <baud>[/<clock_hz>][,DPS[,<io-base>[,<irq>[,<port-bdf>[,<bridge-bdf>]]]] | pci | amt ] `
 
@@ -589,6 +605,16 @@ Paging (HAP).
 
 Flag to enable 2 MB host page table support for Hardware Assisted
 Paging (HAP).
+
+### hardware\_dom
+> `= <domid>`
+
+> Default: `0`
+
+Enable late hardware domain creation using the specified domain ID.  This is
+intended to be used when domain 0 is a stub domain which builds a disaggregated
+system including a hardware domain with the specified domain ID.  This option is
+supported only when compiled with XSM\_ENABLE=y on x86.
 
 ### hpetbroadcast
 > `= <boolean>`
@@ -789,6 +815,14 @@ Defaults to booting secondary processors.
 > `= on | off | fake=<integer> | noacpi`
 
 Default: `on`
+
+### pci
+> `= {no-}serr | {no-}perr`
+
+Disable signaling of SERR (system errors) and/or PERR (parity errors)
+on all PCI devices.
+
+Default: Signaling left as set by firmware.
 
 ### pci-phantom
 > `=[<seg>:]<bus>:<device>,<stride>`

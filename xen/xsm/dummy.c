@@ -58,6 +58,8 @@ void xsm_fixup_ops (struct xsm_operations *ops)
     set_to_dummy_if_null(ops, alloc_security_evtchn);
     set_to_dummy_if_null(ops, free_security_evtchn);
     set_to_dummy_if_null(ops, show_security_evtchn);
+    set_to_dummy_if_null(ops, init_hardware_domain);
+
     set_to_dummy_if_null(ops, get_pod_target);
     set_to_dummy_if_null(ops, set_pod_target);
 
@@ -112,6 +114,7 @@ void xsm_fixup_ops (struct xsm_operations *ops)
 
     set_to_dummy_if_null(ops, add_to_physmap);
     set_to_dummy_if_null(ops, remove_from_physmap);
+    set_to_dummy_if_null(ops, map_gmfn_foreign);
 
 #ifdef CONFIG_X86
     set_to_dummy_if_null(ops, do_mca);
@@ -135,8 +138,5 @@ void xsm_fixup_ops (struct xsm_operations *ops)
     set_to_dummy_if_null(ops, unbind_pt_irq);
     set_to_dummy_if_null(ops, ioport_permission);
     set_to_dummy_if_null(ops, ioport_mapping);
-#endif
-#ifdef CONFIG_ARM
-    set_to_dummy_if_null(ops, map_gmfn_foreign);
 #endif
 }

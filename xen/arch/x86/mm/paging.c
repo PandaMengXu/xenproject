@@ -469,12 +469,8 @@ void paging_log_dirty_range(struct domain *d,
     p2m_lock(p2m);
 
     for ( i = 0, pfn = begin_pfn; pfn < begin_pfn + nr; i++, pfn++ )
-    {
-        p2m_type_t pt;
-        pt = p2m_change_type(d, pfn, p2m_ram_rw, p2m_ram_logdirty);
-        if ( pt == p2m_ram_rw )
+        if ( !p2m_change_type_one(d, pfn, p2m_ram_rw, p2m_ram_logdirty) )
             dirty_bitmap[i >> 3] |= (1 << (i & 7));
-    }
 
     p2m_unlock(p2m);
 
@@ -724,18 +720,15 @@ void paging_update_nestedmode(struct vcpu *v)
 }
 
 void paging_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
-                            l1_pgentry_t *p, mfn_t table_mfn,
-                            l1_pgentry_t new, unsigned int level)
+                            l1_pgentry_t *p, l1_pgentry_t new,
+                            unsigned int level)
 {
     struct domain *d = p2m->domain;
     struct vcpu *v = current;
     if ( v->domain != d )
         v = d->vcpu ? d->vcpu[0] : NULL;
     if ( likely(v && paging_mode_enabled(d) && paging_get_hostmode(v) != NULL) )
-    {
-        return paging_get_hostmode(v)->write_p2m_entry(v, gfn, p, table_mfn,
-                                                       new, level);
-    }
+        paging_get_hostmode(v)->write_p2m_entry(d, gfn, p, new, level);
     else
         safe_write_pte(p, new);
 }

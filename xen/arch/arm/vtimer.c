@@ -44,7 +44,7 @@ static void virt_timer_expired(void *data)
     vgic_vcpu_inject_irq(t->v, t->irq, 1);
 }
 
-int vcpu_domain_init(struct domain *d)
+int domain_vtimer_init(struct domain *d)
 {
     d->arch.phys_timer_base.offset = NOW();
     d->arch.virt_timer_base.offset = READ_SYSREG64(CNTPCT_EL0);
@@ -65,7 +65,7 @@ int vcpu_vtimer_init(struct vcpu *v)
     t->ctl = 0;
     t->cval = NOW();
     t->irq = d0
-        ? timer_dt_irq(TIMER_PHYS_NONSECURE_PPI)->irq
+        ? timer_get_irq(TIMER_PHYS_NONSECURE_PPI)
         : GUEST_TIMER_PHYS_NS_PPI;
     t->v = v;
 
@@ -73,7 +73,7 @@ int vcpu_vtimer_init(struct vcpu *v)
     init_timer(&t->timer, virt_timer_expired, t, v->processor);
     t->ctl = 0;
     t->irq = d0
-        ? timer_dt_irq(TIMER_VIRT_PPI)->irq
+        ? timer_get_irq(TIMER_VIRT_PPI)
         : GUEST_TIMER_VIRT_PPI;
     t->v = v;
 

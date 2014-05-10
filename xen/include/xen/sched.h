@@ -46,6 +46,12 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_runstate_info_compat_t);
 /* A global pointer to the hardware domain (usually DOM0). */
 extern struct domain *hardware_domain;
 
+#ifdef CONFIG_LATE_HWDOM
+extern domid_t hardware_domid;
+#else
+#define hardware_domid 0
+#endif
+
 #ifndef CONFIG_COMPAT
 #define BITS_PER_EVTCHN_WORD(d) BITS_PER_XEN_ULONG
 #else
@@ -795,9 +801,9 @@ void watchdog_domain_destroy(struct domain *d);
  * Use this check when the following are both true:
  *  - Using this feature or interface requires full access to the hardware
  *    (that is, this would not be suitable for a driver domain)
- *  - There is never a reason to deny dom0 access to this
+ *  - There is never a reason to deny the hardware domain access to this
  */
-#define is_hardware_domain(_d) ((_d)->domain_id == 0)
+#define is_hardware_domain(_d) ((_d) == hardware_domain)
 
 /* This check is for functionality specific to a control domain */
 #define is_control_domain(_d) ((_d)->is_privileged)

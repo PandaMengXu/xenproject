@@ -677,15 +677,19 @@ int cpuid_hypervisor_leaves( uint32_t idx, uint32_t sub_idx,
     struct domain *d = current->domain;
     /* Optionally shift out of the way of Viridian architectural leaves. */
     uint32_t base = is_viridian_domain(d) ? 0x40000100 : 0x40000000;
-    uint32_t limit;
+    uint32_t limit, dummy;
 
     idx -= base;
+    if ( idx > XEN_CPUID_MAX_NUM_LEAVES )
+        return 0; /* Avoid unnecessary pass through domain_cpuid() */
 
-    /*
-     * Some Solaris PV drivers fail if max > base + 2. Help them out by
-     * hiding the PVRDTSCP leaf if PVRDTSCP is disabled.
-     */
-    limit = (d->arch.tsc_mode < TSC_MODE_PVRDTSCP) ? 2 : 3;
+    /* Number of leaves may be user-specified */
+    domain_cpuid(d, base, 0, &limit, &dummy, &dummy, &dummy);
+    limit &= 0xff;
+    if ( limit < 2 )
+        limit = 2;
+    else if ( limit > XEN_CPUID_MAX_NUM_LEAVES )
+        limit = XEN_CPUID_MAX_NUM_LEAVES;
 
     if ( idx > limit ) 
         return 0;
@@ -720,6 +724,10 @@ int cpuid_hypervisor_leaves( uint32_t idx, uint32_t sub_idx,
     case 3:
         *eax = *ebx = *ecx = *edx = 0;
         cpuid_time_leaf( sub_idx, eax, ebx, ecx, edx );
+        break;
+
+    case 4:
+        hvm_hypervisor_cpuid_leaf(sub_idx, eax, ebx, ecx, edx);
         break;
 
     default:
@@ -2499,6 +2507,23 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
             if ( wrmsr_safe(regs->ecx, msr_content) != 0 )
                 goto fail;
             break;
+
+        case MSR_AMD64_DR0_ADDRESS_MASK:
+            if ( !boot_cpu_has(X86_FEATURE_DBEXT) || (msr_content >> 32) )
+                goto fail;
+            v->arch.pv_vcpu.dr_mask[0] = msr_content;
+            if ( v->arch.debugreg[7] & DR7_ACTIVE_MASK )
+                wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, msr_content);
+            break;
+        case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
+            if ( !boot_cpu_has(X86_FEATURE_DBEXT) || (msr_content >> 32) )
+                goto fail;
+            v->arch.pv_vcpu.dr_mask
+                [regs->_ecx - MSR_AMD64_DR1_ADDRESS_MASK + 1] = msr_content;
+            if ( v->arch.debugreg[7] & DR7_ACTIVE_MASK )
+                wrmsrl(regs->_ecx, msr_content);
+            break;
+
         default:
             if ( wrmsr_hypervisor_regs(regs->ecx, msr_content) == 1 )
                 break;
@@ -2586,6 +2611,21 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
             regs->eax = (uint32_t)msr_content;
             regs->edx = (uint32_t)(msr_content >> 32);
             break;
+
+        case MSR_AMD64_DR0_ADDRESS_MASK:
+            if ( !boot_cpu_has(X86_FEATURE_DBEXT) )
+                goto fail;
+            regs->eax = v->arch.pv_vcpu.dr_mask[0];
+            regs->edx = 0;
+            break;
+        case MSR_AMD64_DR1_ADDRESS_MASK ... MSR_AMD64_DR3_ADDRESS_MASK:
+            if ( !boot_cpu_has(X86_FEATURE_DBEXT) )
+                goto fail;
+            regs->eax = v->arch.pv_vcpu.dr_mask
+                            [regs->_ecx - MSR_AMD64_DR1_ADDRESS_MASK + 1];
+            regs->edx = 0;
+            break;
+
         default:
             if ( rdmsr_hypervisor_regs(regs->ecx, &val) )
             {
@@ -3629,7 +3669,34 @@ long do_set_trap_table(XEN_GUEST_HANDLE_PARAM(const_trap_info_t) traps)
     return rc;
 }
 
-long set_debugreg(struct vcpu *v, int reg, unsigned long value)
+void activate_debugregs(const struct vcpu *curr)
+{
+    ASSERT(curr == current);
+
+    write_debugreg(0, curr->arch.debugreg[0]);
+    write_debugreg(1, curr->arch.debugreg[1]);
+    write_debugreg(2, curr->arch.debugreg[2]);
+    write_debugreg(3, curr->arch.debugreg[3]);
+    write_debugreg(6, curr->arch.debugreg[6]);
+
+    /*
+     * Avoid writing the subsequently getting replaced value when getting
+     * called from set_debugreg() below. Eventual future callers will need
+     * to take this into account.
+     */
+    if ( curr->arch.debugreg[7] & DR7_ACTIVE_MASK )
+        write_debugreg(7, curr->arch.debugreg[7]);
+
+    if ( boot_cpu_has(X86_FEATURE_DBEXT) )
+    {
+        wrmsrl(MSR_AMD64_DR0_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[0]);
+        wrmsrl(MSR_AMD64_DR1_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[1]);
+        wrmsrl(MSR_AMD64_DR2_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[2]);
+        wrmsrl(MSR_AMD64_DR3_ADDRESS_MASK, curr->arch.pv_vcpu.dr_mask[3]);
+    }
+}
+
+long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
 {
     int i;
     struct vcpu *curr = current;
@@ -3710,11 +3777,8 @@ long set_debugreg(struct vcpu *v, int reg, unsigned long value)
             if ( (v == curr) &&
                  !(v->arch.debugreg[7] & DR7_ACTIVE_MASK) )
             {
-                write_debugreg(0, v->arch.debugreg[0]);
-                write_debugreg(1, v->arch.debugreg[1]);
-                write_debugreg(2, v->arch.debugreg[2]);
-                write_debugreg(3, v->arch.debugreg[3]);
-                write_debugreg(6, v->arch.debugreg[6]);
+                activate_debugregs(v);
+                break;
             }
         }
         if ( v == curr )

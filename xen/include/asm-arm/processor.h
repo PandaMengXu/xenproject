@@ -84,13 +84,28 @@
 #define HCR_SWIO        (_AC(1,UL)<<1) /* Set/Way Invalidation Override */
 #define HCR_VM          (_AC(1,UL)<<0) /* Virtual MMU Enable */
 
+/* HCPTR Hyp. Coprocessor Trap Register */
+#define HCPTR_TTA       ((_AC(1,U)<<20))        /* Trap trace registers */
+#define HCPTR_CP(x)     ((_AC(1,U)<<(x)))       /* Trap Coprocessor x */
+#define HCPTR_CP_MASK   ((_AC(1,U)<<14)-1)
+
+/* HSTR Hyp. System Trap Register */
+#define HSTR_T(x)       ((_AC(1,U)<<(x)))       /* Trap Cp15 c<x> */
+
+/* HDCR Hyp. Debug Configuration Register */
+#define HDCR_TDRA       (_AC(1,U)<<11)          /* Trap Debug ROM access */
+#define HDCR_TDOSA      (_AC(1,U)<<10)          /* Trap Debug-OS-related register access */
+#define HDCR_TDA        (_AC(1,U)<<9)           /* Trap Debug Access */
+#define HDCR_TPM        (_AC(1,U)<<6)           /* Trap Performance Monitors accesses */
+#define HDCR_TPMCR      (_AC(1,U)<<5)           /* Trap PMCR accesses */
+
 #define HSR_EC_UNKNOWN              0x00
 #define HSR_EC_WFI_WFE              0x01
 #define HSR_EC_CP15_32              0x03
 #define HSR_EC_CP15_64              0x04
-#define HSR_EC_CP14_32              0x05
-#define HSR_EC_CP14_DBG             0x06
-#define HSR_EC_CP                   0x07
+#define HSR_EC_CP14_32              0x05        /* Trapped MCR or MRC access to CP14 */
+#define HSR_EC_CP14_DBG             0x06        /* Trapped LDC/STC access to CP14 (only for debug registers) */
+#define HSR_EC_CP                   0x07        /* HCPTR-trapped access to CP0-CP13 */
 #define HSR_EC_CP10                 0x08
 #define HSR_EC_JAZELLE              0x09
 #define HSR_EC_BXJ                  0x0a

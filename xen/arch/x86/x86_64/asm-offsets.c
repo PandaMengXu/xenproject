@@ -14,11 +14,12 @@
 #include <asm/hardirq.h>
 #include <xen/multiboot.h>
 
-#define DEFINE(_sym, _val) \
-    __asm__ __volatile__ ( "\n->" #_sym " %0 " #_val : : "i" (_val) )
-#define BLANK() \
-    __asm__ __volatile__ ( "\n->" : : )
-#define OFFSET(_sym, _str, _mem) \
+#define DEFINE(_sym, _val)                                                 \
+    asm volatile ("\n.ascii\"==>#define " #_sym " %0 /* " #_val " */<==\"" \
+                  : : "i" (_val) )
+#define BLANK()                                                            \
+    asm volatile ( "\n.ascii\"==><==\"" : : )
+#define OFFSET(_sym, _str, _mem)                                           \
     DEFINE(_sym, offsetof(_str, _mem));
 
 void __dummy__(void)
@@ -159,7 +160,7 @@ void __dummy__(void)
     OFFSET(IRQSTAT_softirq_pending, irq_cpustat_t, __softirq_pending);
     BLANK();
 
-    OFFSET(CPUINFO86_ext_features, struct cpuinfo_x86, x86_capability[1]);
+    OFFSET(CPUINFO_features, struct cpuinfo_x86, x86_capability);
     BLANK();
 
     OFFSET(MB_flags, multiboot_info_t, flags);

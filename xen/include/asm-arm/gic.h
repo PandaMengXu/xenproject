@@ -153,6 +153,7 @@
 
 #ifndef __ASSEMBLY__
 #include <xen/device_tree.h>
+#include <xen/irq.h>
 
 #define DT_MATCH_GIC    DT_MATCH_COMPATIBLE("arm,cortex-a15-gic"), \
                         DT_MATCH_COMPATIBLE("arm,cortex-a7-gic")
@@ -166,12 +167,13 @@ extern void vgic_vcpu_inject_irq(struct vcpu *v, unsigned int irq,int virtual);
 extern void vgic_clear_pending_irqs(struct vcpu *v);
 extern struct pending_irq *irq_to_pending(struct vcpu *v, unsigned int irq);
 
-/* Program the GIC to route an interrupt with a dt_irq */
-extern void gic_route_dt_irq(const struct dt_irq *irq,
-                             const cpumask_t *cpu_mask,
-                             unsigned int priority);
-extern void gic_route_ppis(void);
-extern void gic_route_spis(void);
+/* Program the GIC to route an interrupt */
+extern void gic_route_irq_to_xen(struct irq_desc *desc, bool_t level,
+                                 const cpumask_t *cpu_mask,
+                                 unsigned int priority);
+extern void gic_route_irq_to_guest(struct domain *, struct irq_desc *desc,
+                                   bool_t level, const cpumask_t *cpu_mask,
+                                   unsigned int priority);
 
 extern void gic_inject(void);
 extern void gic_clear_pending_irqs(struct vcpu *v);
@@ -181,9 +183,6 @@ extern void __cpuinit init_maintenance_interrupt(void);
 extern void gic_set_guest_irq(struct vcpu *v, unsigned int irq,
         unsigned int state, unsigned int priority);
 extern void gic_remove_from_queues(struct vcpu *v, unsigned int virtual_irq);
-extern int gic_route_irq_to_guest(struct domain *d,
-                                  const struct dt_irq *irq,
-                                  const char * devname);
 
 /* Accept an interrupt from the GIC and dispatch its handler */
 extern void gic_interrupt(struct cpu_user_regs *regs, int is_fiq);

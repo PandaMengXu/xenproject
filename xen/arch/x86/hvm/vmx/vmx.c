@@ -57,6 +57,10 @@
 #include <asm/apic.h>
 #include <asm/hvm/nestedhvm.h>
 #include <asm/event.h>
+#include <public/arch-x86/cpuid.h>
+
+static bool_t __initdata opt_force_ept;
+boolean_param("force-ept", opt_force_ept);
 
 enum handler_return { HNDL_done, HNDL_unhandled, HNDL_exception_raised };
 
@@ -540,7 +544,8 @@ static void vmx_save_cpu_state(struct vcpu *v, struct hvm_hw_cpu *data)
     data->msr_star         = guest_state->msrs[VMX_INDEX_MSR_STAR];
     data->msr_syscall_mask = guest_state->msrs[VMX_INDEX_MSR_SYSCALL_MASK];
 
-    data->tsc = hvm_get_guest_tsc(v);
+    data->tsc = hvm_get_guest_tsc_fixed(v,
+                                        v->domain->arch.hvm_domain.sync_tsc);
 }
 
 static void vmx_load_cpu_state(struct vcpu *v, struct hvm_hw_cpu *data)
@@ -556,7 +561,7 @@ static void vmx_load_cpu_state(struct vcpu *v, struct hvm_hw_cpu *data)
     v->arch.hvm_vmx.cstar     = data->msr_cstar;
     v->arch.hvm_vmx.shadow_gs = data->shadow_gs;
 
-    hvm_set_guest_tsc(v, data->tsc);
+    hvm_set_guest_tsc_fixed(v, data->tsc, v->domain->arch.hvm_domain.sync_tsc);
 }
 
 
@@ -1052,7 +1057,7 @@ static void vmx_handle_cd(struct vcpu *v, unsigned long value)
     }
 }
 
-static void vmx_set_tsc_offset(struct vcpu *v, u64 offset)
+static void vmx_set_tsc_offset(struct vcpu *v, u64 offset, u64 at_tsc)
 {
     vmx_vmcs_enter(v);
 
@@ -1651,6 +1656,24 @@ static void vmx_handle_eoi(u8 vector)
     __vmwrite(GUEST_INTR_STATUS, status);
 }
 
+void vmx_hypervisor_cpuid_leaf(uint32_t sub_idx,
+                               uint32_t *eax, uint32_t *ebx,
+                               uint32_t *ecx, uint32_t *edx)
+{
+    if ( sub_idx != 0 )
+        return;
+    if ( cpu_has_vmx_apic_reg_virt )
+        *eax |= XEN_HVM_CPUID_APIC_ACCESS_VIRT;
+    /*
+     * We want to claim that x2APIC is virtualized if APIC MSR accesses are
+     * not intercepted. When all three of these are true both rdmsr and wrmsr
+     * in the guest will run without VMEXITs (see vmx_vlapic_msr_changed()).
+     */
+    if ( cpu_has_vmx_virtualize_x2apic_mode && cpu_has_vmx_apic_reg_virt &&
+         cpu_has_vmx_virtual_intr_delivery )
+        *eax |= XEN_HVM_CPUID_X2APIC_VIRT;
+}
+
 static struct hvm_function_table __initdata vmx_function_table = {
     .name                 = "VMX",
     .cpu_up_prepare       = vmx_cpu_up_prepare,
@@ -1708,6 +1731,7 @@ static struct hvm_function_table __initdata vmx_function_table = {
     .sync_pir_to_irr      = vmx_sync_pir_to_irr,
     .handle_eoi           = vmx_handle_eoi,
     .nhvm_hap_walk_L1_p2m = nvmx_hap_walk_L1_p2m,
+    .hypervisor_cpuid_leaf = vmx_hypervisor_cpuid_leaf,
 };
 
 const struct hvm_function_table * __init start_vmx(void)
@@ -1724,7 +1748,7 @@ const struct hvm_function_table * __init start_vmx(void)
      * Do not enable EPT when (!cpu_has_vmx_pat), to prevent security hole
      * (refer to http://xenbits.xen.org/xsa/advisory-60.html).
      */
-    if ( cpu_has_vmx_ept && cpu_has_vmx_pat )
+    if ( cpu_has_vmx_ept && (cpu_has_vmx_pat || opt_force_ept) )
     {
         vmx_function_table.hap_supported = 1;
 
@@ -2303,18 +2327,13 @@ static void vmx_do_extint(struct cpu_user_regs *regs)
     do_IRQ(regs);
 }
 
-static void wbinvd_ipi(void *info)
-{
-    wbinvd();
-}
-
 static void vmx_wbinvd_intercept(void)
 {
     if ( !cache_flush_permitted(current->domain) || iommu_snoop )
         return;
 
     if ( cpu_has_wbinvd_exiting )
-        on_each_cpu(wbinvd_ipi, NULL, 1);
+        flush_all(FLUSH_CACHE);
     else
         wbinvd();
 }

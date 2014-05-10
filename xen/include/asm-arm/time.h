@@ -22,11 +22,8 @@ enum timer_ppi
     MAX_TIMER_PPI = 4,
 };
 
-/* Get one of the timer IRQ description */
-const struct dt_irq* timer_dt_irq(enum timer_ppi ppi);
-
-/* Route timer's IRQ on this CPU */
-extern void __cpuinit route_timer_interrupt(void);
+/* Get one of the timer IRQ number */
+unsigned int timer_get_irq(enum timer_ppi ppi);
 
 /* Set up the timer interrupt on this CPU */
 extern void __cpuinit init_timer_interrupt(void);

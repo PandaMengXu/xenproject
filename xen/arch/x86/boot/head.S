@@ -6,6 +6,7 @@
 #include <asm/fixmap.h>
 #include <asm/page.h>
 #include <asm/msr.h>
+#include <asm/cpufeature.h>
 
         .text
         .code32
@@ -32,10 +33,18 @@ ENTRY(start)
         /* Checksum: must be the negated sum of the first two fields. */
         .long   -(MULTIBOOT_HEADER_MAGIC + MULTIBOOT_HEADER_FLAGS)
 
-        .section .init.text, "ax"
+        .section .init.rodata, "a", @progbits
+        .align 4
+
+        .word   0
+gdt_boot_descr:
+        .word   6*8-1
+        .long   sym_phys(trampoline_gdt)
 
 .Lbad_cpu_msg: .asciz "ERR: Not a 64-bit CPU!"
 .Lbad_ldr_msg: .asciz "ERR: Not a Multiboot bootloader!"
+
+        .section .init.text, "ax", @progbits
 
 bad_cpu:
         mov     $(sym_phys(.Lbad_cpu_msg)),%esi # Error message
@@ -46,11 +55,11 @@ print_err:
         mov     $0xB8000,%edi  # VGA framebuffer
 1:      mov     (%esi),%bl
         test    %bl,%bl        # Terminate on '\0' sentinel
-2:      je      2b
+        je      .Lhalt
         mov     $0x3f8+5,%dx   # UART Line Status Register
-3:      in      %dx,%al
+2:      in      %dx,%al
         test    $0x20,%al      # Test THR Empty flag
-        je      3b
+        je      2b
         mov     $0x3f8+0,%dx   # UART Transmit Holding Register
         mov     %bl,%al
         out     %al,%dx        # Send a character over the serial line
@@ -58,10 +67,8 @@ print_err:
         mov     $7,%al
         stosb                  # Write an attribute to the VGA framebuffer
         jmp     1b
-
-gdt_boot_descr:
-        .word   6*8-1
-        .long   sym_phys(trampoline_gdt)
+.Lhalt: hlt
+        jmp     .Lhalt
 
 __start:
         cld
@@ -131,10 +138,10 @@ __start:
         mov     $0x80000001,%eax
         cpuid
 1:      mov     %edx,sym_phys(cpuid_ext_features)
-        mov     %edx,sym_phys(boot_cpu_data)+CPUINFO86_ext_features
+        mov     %edx,sym_phys(boot_cpu_data)+CPUINFO_FEATURE_OFFSET(X86_FEATURE_LM)
 
         /* Check for availability of long mode. */
-        bt      $29,%edx
+        bt      $X86_FEATURE_LM & 0x1f,%edx
         jnc     bad_cpu
 
         /* Stash TSC to calculate a good approximation of time-since-boot */

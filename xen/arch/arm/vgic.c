@@ -374,6 +374,7 @@ static void vgic_disable_irqs(struct vcpu *v, uint32_t r, int n)
     const unsigned long mask = r;
     struct pending_irq *p;
     unsigned int irq;
+    unsigned long flags;
     int i = 0;
 
     while ( (i = find_next_bit(&mask, 32, i)) < 32 ) {
@@ -382,7 +383,11 @@ static void vgic_disable_irqs(struct vcpu *v, uint32_t r, int n)
         clear_bit(GIC_IRQ_GUEST_ENABLED, &p->status);
         gic_remove_from_queues(v, irq);
         if ( p->desc != NULL )
+        {
+            spin_lock_irqsave(&p->desc->lock, flags);
             p->desc->handler->disable(p->desc);
+            spin_unlock_irqrestore(&p->desc->lock, flags);
+        }
         i++;
     }
 }
@@ -392,6 +397,7 @@ static void vgic_enable_irqs(struct vcpu *v, uint32_t r, int n)
     const unsigned long mask = r;
     struct pending_irq *p;
     unsigned int irq;
+    unsigned long flags;
     int i = 0;
 
     while ( (i = find_next_bit(&mask, 32, i)) < 32 ) {
@@ -401,7 +407,11 @@ static void vgic_enable_irqs(struct vcpu *v, uint32_t r, int n)
         if ( !list_empty(&p->inflight) && !test_bit(GIC_IRQ_GUEST_VISIBLE, &p->status) )
             gic_set_guest_irq(v, irq, GICH_LR_PENDING, p->priority);
         if ( p->desc != NULL )
+        {
+            spin_lock_irqsave(&p->desc->lock, flags);
             p->desc->handler->enable(p->desc);
+            spin_unlock_irqrestore(&p->desc->lock, flags);
+        }
         i++;
     }
 }
@@ -592,8 +602,8 @@ static int vgic_distr_mmio_write(struct vcpu *v, mmio_info_t *info)
     case GICD_ICFGR + 2 ... GICD_ICFGRN: /* SPIs */
         if ( dabt.size != 2 ) goto bad_width;
         rank = vgic_irq_rank(v, 2, gicd_reg - GICD_ICFGR);
-        vgic_lock_rank(v, rank);
         if ( rank == NULL) goto write_ignore;
+        vgic_lock_rank(v, rank);
         rank->icfg[REG_RANK_INDEX(2, gicd_reg - GICD_ICFGR)] = *r;
         vgic_unlock_rank(v, rank);
         return 1;

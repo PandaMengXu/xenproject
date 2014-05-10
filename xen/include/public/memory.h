@@ -187,6 +187,15 @@ typedef struct xen_machphys_mfn_list xen_machphys_mfn_list_t;
 DEFINE_XEN_GUEST_HANDLE(xen_machphys_mfn_list_t);
 
 /*
+ * For a compat caller, this is identical to XENMEM_machphys_mfn_list.
+ *
+ * For a non compat caller, this functions similarly to
+ * XENMEM_machphys_mfn_list, but returns the mfns making up the compatibility
+ * m2p table.
+ */
+#define XENMEM_machphys_compat_mfn_list     25
+
+/*
  * Returns the location in virtual address space of the machine_to_phys
  * mapping table. Architectures which do not have a m2p table, or which do not
  * map it by default into guest address space, do not implement this command.
@@ -363,9 +372,6 @@ typedef struct xen_pod_target xen_pod_target_t;
 #define XENMEM_paging_op_evict              1
 #define XENMEM_paging_op_prep               2
 
-#define XENMEM_access_op                    21
-#define XENMEM_access_op_resume             0
-
 struct xen_mem_event_op {
     uint8_t     op;         /* XENMEM_*_op_* */
     domid_t     domain;
@@ -378,6 +384,56 @@ struct xen_mem_event_op {
 };
 typedef struct xen_mem_event_op xen_mem_event_op_t;
 DEFINE_XEN_GUEST_HANDLE(xen_mem_event_op_t);
+
+#define XENMEM_access_op                    21
+#define XENMEM_access_op_resume             0
+#define XENMEM_access_op_set_access         1
+#define XENMEM_access_op_get_access         2
+
+typedef enum {
+    XENMEM_access_n,
+    XENMEM_access_r,
+    XENMEM_access_w,
+    XENMEM_access_rw,
+    XENMEM_access_x,
+    XENMEM_access_rx,
+    XENMEM_access_wx,
+    XENMEM_access_rwx,
+    /*
+     * Page starts off as r-x, but automatically
+     * change to r-w on a write
+     */
+    XENMEM_access_rx2rw,
+    /*
+     * Log access: starts off as n, automatically
+     * goes to rwx, generating an event without
+     * pausing the vcpu
+     */
+    XENMEM_access_n2rwx,
+    /* Take the domain default */
+    XENMEM_access_default
+} xenmem_access_t;
+
+struct xen_mem_access_op {
+    /* XENMEM_access_op_* */
+    uint8_t op;
+    /* xenmem_access_t */
+    uint8_t access;
+    domid_t domid;
+    /*
+     * Number of pages for set op
+     * Ignored on setting default access and other ops
+     */
+    uint32_t nr;
+    /*
+     * First pfn for set op
+     * pfn for get op
+     * ~0ull is used to set and get the default access for pages
+     */
+    uint64_aligned_t pfn;
+};
+typedef struct xen_mem_access_op xen_mem_access_op_t;
+DEFINE_XEN_GUEST_HANDLE(xen_mem_access_op_t);
 
 #define XENMEM_sharing_op                   22
 #define XENMEM_sharing_op_nominate_gfn      0
@@ -487,6 +543,8 @@ struct wrmsr_op{
 typedef struct wrmsr_op wrmsr_op_t;
 
 #endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
+
+/* Next available subop number is 26 */
 
 #endif /* __XEN_PUBLIC_MEMORY_H__ */
 
