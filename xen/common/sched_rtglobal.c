@@ -650,3 +650,25 @@ rtglobal_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work
 
     return ret;
 }
+
+/* Remove VCPU from RunQ */
+/* The lock is already grabbed in schedule.c, no need to lock here */
+static void
+rtglobal_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
+{
+    struct rtglobal_vcpu * const svc = RTGLOBAL_VCPU(vc);
+
+    BUG_ON( is_idle_vcpu(vc) );
+
+    if ( curr_on_cpu(vc->processor) == vc ) {
+        cpu_raise_softirq(vc->processor, SCHEDULE_SOFTIRQ);
+        return;
+    }
+
+    if ( __vcpu_on_runq(svc) ) {
+        __runq_remove(svc);
+    }
+
+    clear_bit(__RTGLOBAL_delayed_runq_add, &svc->flags);
+}
+
