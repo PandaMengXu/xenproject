@@ -273,3 +273,46 @@ rtglobal_dump(const struct scheduler *ops)
     printk("\n");
 }
 
+/*
+ * Init/Free related code
+ */
+static int
+rtglobal_init(struct scheduler *ops)
+{
+    struct rtglobal_private *prv;
+
+    prv = xmalloc(struct rtglobal_private);
+    if ( prv == NULL ) {
+        printk("malloc failed at rtglobal_private\n");
+        return -ENOMEM;
+    }
+    memset(prv, 0, sizeof(*prv));
+
+    ops->sched_data = prv;
+    spin_lock_init(&prv->lock);
+    INIT_LIST_HEAD(&prv->sdom);
+    INIT_LIST_HEAD(&prv->runq);
+    cpumask_clear(&prv->tickled);
+    cpumask_clear(&prv->cpus);
+    prv->priority_scheme = EDF;     /* by default, use EDF scheduler */
+
+    printk("This is the Deferrable Server version of the preemptive RTGLOBAL scheduler\n");
+    printk("If you want to use it as a periodic server, please run a background busy CPU task\n");
+    printtime();
+    printk("\n");
+
+    return 0;
+}
+
+static void
+rtglobal_deinit(const struct scheduler *ops)
+{
+    struct rtglobal_private *prv;
+
+    printtime();
+    printk("\n");
+
+    prv = RTGLOBAL_PRIV(ops);
+    if ( prv )
+        xfree(prv);
+}
