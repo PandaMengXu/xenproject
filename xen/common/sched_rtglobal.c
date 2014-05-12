@@ -386,3 +386,33 @@ rtglobal_free_domdata(const struct scheduler *ops, void *data)
     spin_unlock_irqrestore(&prv->lock, flags);
     xfree(data);
 }
+
+static int
+rtglobal_dom_init(const struct scheduler *ops, struct domain *dom)
+{
+    struct rtglobal_dom *sdom;
+
+    printtime();
+    printk("dom=%d\n", dom->domain_id);
+
+    /* IDLE Domain does not link on rtglobal_private */
+    if ( is_idle_domain(dom) ) { return 0; }
+
+    sdom = rtglobal_alloc_domdata(ops, dom);
+    if ( sdom == NULL ) {
+        printk("%s, failed\n", __func__);
+        return -ENOMEM;
+    }
+    dom->sched_priv = sdom;
+
+    return 0;
+}
+
+static void
+rtglobal_dom_destroy(const struct scheduler *ops, struct domain *dom)
+{
+    printtime();
+    printk("dom=%d\n", dom->domain_id);
+
+    rtglobal_free_domdata(ops, RTGLOBAL_DOM(dom));
+}
