@@ -733,3 +733,46 @@ runq_tickle(const struct scheduler *ops, struct rtglobal_vcpu *new)
     }
     return;
 }
+
+/* Should always wake up runnable vcpu, put it back to RunQ. 
+ * Check priority to raise interrupt 
+ * The lock is already grabbed in schedule.c, no need to lock here 
+ * TODO: what if these two vcpus belongs to the same domain? */
+static void
+rtglobal_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
+{
+    struct rtglobal_vcpu * const svc = RTGLOBAL_VCPU(vc);
+    s_time_t diff;
+    s_time_t now = NOW();
+    long count = 0;
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+    struct rtglobal_vcpu * snext = NULL;        /* highest priority on RunQ */
+
+    BUG_ON( is_idle_vcpu(vc) );
+
+    if ( unlikely(curr_on_cpu(vc->processor) == vc) ) return;
+
+    /* on RunQ, just update info is ok */
+    if ( unlikely(__vcpu_on_runq(svc)) ) return;
+
+    /* If context hasn't been saved yet, set flag so it will add later */
+    if ( unlikely(test_bit(__RTGLOBAL_scheduled, &svc->flags)) ) {
+        set_bit(__RTGLOBAL_delayed_runq_add, &svc->flags);
+        return;
+    }
+
+    /* update deadline info */
+    diff = now - svc->cur_deadline;
+    if ( diff >= 0 ) {
+        count = ( diff/MILLISECS(svc->period) ) + 1;
+        svc->cur_deadline += count * MILLISECS(svc->period);
+        svc->cur_budget = svc->budget * 1000;
+    }
+
+    __runq_insert(ops, svc);
+    __repl_update(ops, now);
+    snext = __runq_pick(ops, prv->cpus);    /* pick snext from ALL cpus */
+    runq_tickle(ops, snext);
+
+    return;
+}
