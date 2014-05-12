@@ -776,3 +776,26 @@ rtglobal_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
 
     return;
 }
+
+/* scurr has finished context switch, insert it back to the RunQ,
+ * and then pick the highest priority vcpu from runq to run */
+static void
+rtglobal_context_saved(const struct scheduler *ops, struct vcpu *vc)
+{
+    struct rtglobal_vcpu * svc = RTGLOBAL_VCPU(vc);
+    struct rtglobal_vcpu * snext = NULL;
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+
+    clear_bit(__RTGLOBAL_scheduled, &svc->flags);
+    if ( is_idle_vcpu(vc) ) return;
+
+    vcpu_schedule_lock_irq(vc);
+    if ( test_and_clear_bit(__RTGLOBAL_delayed_runq_add, &svc->flags) && 
+         likely(vcpu_runnable(vc)) ) {
+        __runq_insert(ops, svc);
+        __repl_update(ops, NOW());
+        snext = __runq_pick(ops, prv->cpus);    /* pick snext from ALL cpus */
+        runq_tickle(ops, snext);
+    }
+    vcpu_schedule_unlock_irq(vc);
+}
