@@ -316,3 +316,27 @@ rtglobal_deinit(const struct scheduler *ops)
     if ( prv )
         xfree(prv);
 }
+
+/* point per_cpu spinlock to the global system lock; all cpu have same global system lock */
+static void *
+rtglobal_alloc_pdata(const struct scheduler *ops, int cpu)
+{
+    struct rtglobal_private *prv = RTGLOBAL_PRIV(ops);
+
+    cpumask_set_cpu(cpu, &prv->cpus);
+
+    per_cpu(schedule_data, cpu).schedule_lock = &prv->lock;
+
+    printtime();
+    printk("total cpus: %d", cpumask_weight(&prv->cpus));
+    return (void *)1;
+}
+
+static void
+rtglobal_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
+{
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+    cpumask_clear_cpu(cpu, &prv->cpus);
+    printtime();
+    printk("cpu=%d\n", cpu);
+}
