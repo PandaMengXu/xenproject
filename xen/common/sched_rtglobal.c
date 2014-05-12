@@ -553,3 +553,32 @@ burn_budgets(const struct scheduler *ops, struct rtglobal_vcpu *svc, s_time_t no
     svc->cur_budget -= consume;
     if ( svc->cur_budget < 0 ) svc->cur_budget = 0;
 }
+
+/* RunQ is sorted. Pick first one within cpumask. If no one, return NULL */
+/* lock is grabbed before calling this function */
+static struct rtglobal_vcpu *
+__runq_pick(const struct scheduler *ops, cpumask_t mask)
+{
+    struct list_head *runq = RUNQ(ops);
+    struct list_head *iter;
+    struct rtglobal_vcpu *svc = NULL;
+    struct rtglobal_vcpu *iter_svc = NULL;
+    cpumask_t cpu_common;
+
+    list_for_each(iter, runq) {
+        iter_svc = __runq_elem(iter);
+
+        cpumask_copy(&cpu_common, iter_svc->vcpu->cpu_affinity);
+        cpumask_and(&cpu_common, &mask, &cpu_common);
+        if ( cpumask_empty(&cpu_common) )
+            continue;
+
+        if ( iter_svc->cur_budget <= 0 && iter_svc->sdom->extra == 0 )
+            continue;
+
+        svc = iter_svc;
+        break;
+    }
+
+    return svc;
+}
