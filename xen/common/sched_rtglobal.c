@@ -501,3 +501,55 @@ rtglobal_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
     }
 }
 
+/* Implemented as deferrable server. 
+ * Different server mechanism has different implementation.
+ * burn budget at microsecond level. */
+static void
+burn_budgets(const struct scheduler *ops, struct rtglobal_vcpu *svc, s_time_t now) {
+    s_time_t delta;
+    unsigned int consume;
+    long count = 0;
+
+    /* first time called for this svc, update last_start */
+    if ( svc->last_start == 0 ) {
+        svc->last_start = now;
+        return;
+    }
+
+    /* don't burn budget for idle VCPU */
+    if ( is_idle_vcpu(svc->vcpu) ) {
+        return;
+    }
+
+    /* don't burn budget for Domain-0, RT-Xen use only */
+    if ( svc->sdom->dom->domain_id == 0 ) {
+        return;
+    }
+
+    /* update deadline info */
+    delta = now - svc->cur_deadline;
+    if ( delta >= 0 ) {
+        count = ( delta/MILLISECS(svc->period) ) + 1;
+        svc->cur_deadline += count * MILLISECS(svc->period);
+        svc->cur_budget = svc->budget * 1000;
+        return;
+    }
+
+    delta = now - svc->last_start;
+    if ( delta < 0 ) {
+        printk("%s, delta = %ld for ", __func__, delta);
+        rtglobal_dump_vcpu(svc);
+        svc->last_start = now;  /* update last_start */
+        svc->cur_budget = 0;
+        return;
+    }
+
+    if ( svc->cur_budget == 0 ) return;
+
+    /* burn at microseconds level */
+    consume = ( delta/MICROSECS(1) );
+    if ( delta%MICROSECS(1) > MICROSECS(1)/2 ) consume++;
+
+    svc->cur_budget -= consume;
+    if ( svc->cur_budget < 0 ) svc->cur_budget = 0;
+}
