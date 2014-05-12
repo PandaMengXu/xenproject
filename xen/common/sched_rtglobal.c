@@ -501,6 +501,26 @@ rtglobal_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
     }
 }
 
+/* Pick a valid CPU for the vcpu vc
+ * Valid CPU of a vcpu is intesection of vcpu's affinity and available cpus */
+static int
+rtglobal_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
+{
+    cpumask_t cpus;
+    int cpu;
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+
+    cpumask_copy(&cpus, vc->cpu_affinity);
+    cpumask_and(&cpus, &prv->cpus, &cpus);
+
+    cpu = cpumask_test_cpu(vc->processor, &cpus)
+            ? vc->processor 
+            : cpumask_cycle(vc->processor, &cpus);
+    ASSERT( !cpumask_empty(&cpus) && cpumask_test_cpu(cpu, &cpus) );
+
+    return cpu;
+}
+
 /* Implemented as deferrable server. 
  * Different server mechanism has different implementation.
  * burn budget at microsecond level. */
