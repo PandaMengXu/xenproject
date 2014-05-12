@@ -609,3 +609,139 @@ __repl_update(const struct scheduler *ops, s_time_t now)
         }
     }
 }
+
+/* schedule function for rtglobal scheduler.
+ * The lock is already grabbed in schedule.c, no need to lock here */
+static struct task_slice
+rtglobal_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_scheduled)
+{
+    const int cpu = smp_processor_id();
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+    struct rtglobal_vcpu * const scurr = RTGLOBAL_VCPU(current);
+    struct rtglobal_vcpu * snext = NULL;
+    struct task_slice ret;
+
+    /* clear ticked bit now that we've been scheduled */
+    if ( cpumask_test_cpu(cpu, &prv->tickled) )
+        cpumask_clear_cpu(cpu, &prv->tickled);
+
+    /* burn_budget would return for IDLE VCPU */
+    burn_budgets(ops, scurr, now);
+
+    __repl_update(ops, now);
+
+    if ( tasklet_work_scheduled ) {
+        snext = RTGLOBAL_VCPU(idle_vcpu[cpu]);
+    } else {
+        cpumask_t cur_cpu;
+        cpumask_clear(&cur_cpu);
+        cpumask_set_cpu(cpu, &cur_cpu);
+        snext = __runq_pick(ops, cur_cpu);
+        if ( snext == NULL )
+            snext = RTGLOBAL_VCPU(idle_vcpu[cpu]);
+
+        /* if scurr has higher priority and budget, still pick scurr */
+        if ( !is_idle_vcpu(current) &&
+             vcpu_runnable(current) &&
+             scurr->cur_budget > 0 &&
+             ( is_idle_vcpu(snext->vcpu) ||
+               ( prv->priority_scheme == EDF && 
+                scurr->cur_deadline <= snext->cur_deadline ) ||
+               ( prv->priority_scheme == RM && 
+                scurr->period <= snext->period ) ) ) {
+            snext = scurr;
+        }
+    }
+
+    if ( snext != scurr &&
+         !is_idle_vcpu(current) &&
+         vcpu_runnable(current) ) {
+        set_bit(__RTGLOBAL_delayed_runq_add, &scurr->flags);
+    }
+
+    snext->last_start = now;
+    ret.migrated = 0;
+    if ( !is_idle_vcpu(snext->vcpu) ) {
+        if ( snext != scurr ) {
+            __runq_remove(snext);
+            set_bit(__RTGLOBAL_scheduled, &snext->flags);
+        }
+        if ( snext->vcpu->processor != cpu ) {
+            snext->vcpu->processor = cpu;
+            ret.migrated = 1;
+        }
+    }
+
+    ret.time = MILLISECS(1);
+    ret.task = snext->vcpu;
+
+    return ret;
+}
+
+/* schedule function for rtglobal scheduler.
+ * The lock is already grabbed in schedule.c, no need to lock here */
+static struct task_slice
+rtglobal_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_scheduled)
+{
+    const int cpu = smp_processor_id();
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+    struct rtglobal_vcpu * const scurr = RTGLOBAL_VCPU(current);
+    struct rtglobal_vcpu * snext = NULL;
+    struct task_slice ret;
+
+    /* clear ticked bit now that we've been scheduled */
+    if ( cpumask_test_cpu(cpu, &prv->tickled) )
+        cpumask_clear_cpu(cpu, &prv->tickled);
+
+    /* burn_budget would return for IDLE VCPU */
+    burn_budgets(ops, scurr, now);
+
+    __repl_update(ops, now);
+
+    if ( tasklet_work_scheduled ) {
+        snext = RTGLOBAL_VCPU(idle_vcpu[cpu]);
+    } else {
+        cpumask_t cur_cpu;
+        cpumask_clear(&cur_cpu);
+        cpumask_set_cpu(cpu, &cur_cpu);
+        snext = __runq_pick(ops, cur_cpu);
+        if ( snext == NULL )
+            snext = RTGLOBAL_VCPU(idle_vcpu[cpu]);
+
+        /* if scurr has higher priority and budget, still pick scurr */
+        if ( !is_idle_vcpu(current) &&
+             vcpu_runnable(current) &&
+             scurr->cur_budget > 0 &&
+             ( is_idle_vcpu(snext->vcpu) ||
+               ( prv->priority_scheme == EDF && 
+                scurr->cur_deadline <= snext->cur_deadline ) ||
+               ( prv->priority_scheme == RM && 
+                scurr->period <= snext->period ) ) ) {
+            snext = scurr;
+        }
+    }
+
+    if ( snext != scurr &&
+         !is_idle_vcpu(current) &&
+         vcpu_runnable(current) ) {
+        set_bit(__RTGLOBAL_delayed_runq_add, &scurr->flags);
+    }
+
+    snext->last_start = now;
+    ret.migrated = 0;
+    if ( !is_idle_vcpu(snext->vcpu) ) {
+        if ( snext != scurr ) {
+            __runq_remove(snext);
+            set_bit(__RTGLOBAL_scheduled, &snext->flags);
+        }
+        if ( snext->vcpu->processor != cpu ) {
+            snext->vcpu->processor = cpu;
+            ret.migrated = 1;
+        }
+    }
+
+    ret.time = MILLISECS(1);
+    ret.task = snext->vcpu;
+
+    return ret;
+}
