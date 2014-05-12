@@ -799,3 +799,38 @@ rtglobal_context_saved(const struct scheduler *ops, struct vcpu *vc)
     }
     vcpu_schedule_unlock_irq(vc);
 }
+
+static struct rtglobal_private _rtglobal_priv;
+
+const struct scheduler sched_rtglobal_def = {
+    .name           = "SMP RTGLOBAL Scheduler",
+    .opt_name       = "rtglobal",
+    .sched_id       = XEN_SCHEDULER_RTGLOBAL,
+    .sched_data     = &_rtglobal_priv,
+
+    .dump_cpu_state = rtglobal_dump_pcpu,
+    .dump_settings  = rtglobal_dump,
+    .init           = rtglobal_init,
+    .deinit         = rtglobal_deinit,
+    .alloc_pdata    = rtglobal_alloc_pdata,
+    .free_pdata     = rtglobal_free_pdata,
+    .alloc_domdata  = rtglobal_alloc_domdata,
+    .free_domdata   = rtglobal_free_domdata,
+    .init_domain    = rtglobal_dom_init,
+    .destroy_domain = rtglobal_dom_destroy,
+    .alloc_vdata    = rtglobal_alloc_vdata,
+    .free_vdata     = rtglobal_free_vdata,
+    .insert_vcpu    = rtglobal_vcpu_insert,
+    .remove_vcpu    = rtglobal_vcpu_remove,
+
+    .adjust         = rtglobal_dom_cntl,
+
+    .pick_cpu       = rtglobal_cpu_pick,
+    .do_schedule    = rtglobal_schedule,
+    .sleep          = rtglobal_vcpu_sleep,
+    .wake           = rtglobal_vcpu_wake,
+    .context_saved  = rtglobal_context_saved,
+
+    .yield          = NULL,
+    .migrate        = NULL,
+};
