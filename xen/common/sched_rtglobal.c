@@ -194,3 +194,82 @@ __runq_insert(const struct scheduler *ops, struct rtglobal_vcpu *svc)
     list_add_tail(&svc->runq_elem, iter);
 }
 
+
+/**
+ * Debug related code, dump vcpu/cpu information
+ */
+static void
+rtglobal_dump_vcpu(struct rtglobal_vcpu *svc)
+{
+    if ( svc == NULL ) {
+        printk("NULL!\n");
+        return;
+    }
+    printk("[%5d.%-2d] cpu %d, (%-2d, %-2d), cur_b=%ld cur_d=%lu last_start=%lu onR=%d runnable=%d\n",
+            svc->vcpu->domain->domain_id,
+            svc->vcpu->vcpu_id,
+            svc->vcpu->processor,
+            svc->period,
+            svc->budget,
+            svc->cur_budget,
+            svc->cur_deadline,
+            svc->last_start,
+            __vcpu_on_runq(svc),
+            vcpu_runnable(svc->vcpu));
+}
+
+static void
+rtglobal_dump_pcpu(const struct scheduler *ops, int cpu)
+{
+    struct rtglobal_vcpu *svc = RTGLOBAL_VCPU(curr_on_cpu(cpu));
+
+    printtime();
+    rtglobal_dump_vcpu(svc);
+}
+
+/* should not need lock here. only showing stuff */
+static void
+rtglobal_dump(const struct scheduler *ops)
+{
+    struct list_head *iter_sdom, *iter_svc, *runq, *iter;
+    struct rtglobal_private *prv = RTGLOBAL_PRIV(ops);
+    struct rtglobal_vcpu *svc;
+    int cpu = 0;
+    int loop = 0;
+
+    printtime();
+    printk("Priority Scheme: ");
+    if ( prv->priority_scheme == EDF ) printk("EDF\n");
+    else printk ("RM\n");
+
+    printk("PCPU info: \n");
+    for_each_cpu(cpu, &prv->cpus) {
+        rtglobal_dump_pcpu(ops, cpu);
+    }
+
+    printk("Global RunQueue info: \n");
+    loop = 0;
+    runq = RUNQ(ops);
+    list_for_each( iter, runq ) {
+        svc = __runq_elem(iter);
+        printk("\t%3d: ", ++loop);
+        rtglobal_dump_vcpu(svc);
+    }
+
+    printk("Domain info: \n");
+    loop = 0;
+    list_for_each( iter_sdom, &prv->sdom ) {
+        struct rtglobal_dom *sdom;
+        sdom = list_entry(iter_sdom, struct rtglobal_dom, sdom_elem);
+        printk("\tdomain: %d\n", sdom->dom->domain_id);
+
+        list_for_each( iter_svc, &sdom->vcpu ) {
+            svc = list_entry(iter_svc, struct rtglobal_vcpu, sdom_elem);
+            printk("\t\t%3d: ", ++loop);
+            rtglobal_dump_vcpu(svc);
+        }
+    }
+
+    printk("\n");
+}
+
