@@ -672,3 +672,64 @@ rtglobal_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
     clear_bit(__RTGLOBAL_delayed_runq_add, &svc->flags);
 }
 
+/*
+ * Pick a vcpu on a cpu to kick out to place the running candidate
+ * Called by wake() and context_saved()
+ * We have a running candidate here, the kick logic is:
+ * Among all the cpus that are within the cpu affinity
+ * 1) if the new->cpu is idle, kick it. This could benefit cache hit
+ * 2) if there are any idle vcpu, kick it.
+ * 3) now all pcpus are busy, among all the running vcpus, pick lowest priority one
+ *    if snext has higher priority, kick it.
+ * TODO: what if these two vcpus belongs to the same domain?
+ * replace a vcpu belonging to the same domain does not make sense
+ */
+/* lock is grabbed before calling this function */
+static void
+runq_tickle(const struct scheduler *ops, struct rtglobal_vcpu *new)
+{
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+    struct rtglobal_vcpu * scheduled = NULL;    /* lowest priority scheduled */
+    struct rtglobal_vcpu * iter_svc;
+    struct vcpu * iter_vc;
+    int cpu = 0;
+    cpumask_t not_tickled;                  /* not tickled cpus */
+
+    if ( new == NULL || is_idle_vcpu(new->vcpu) ) return;
+
+    cpumask_copy(&not_tickled, new->vcpu->cpu_affinity);
+    cpumask_andnot(&not_tickled, &not_tickled, &prv->tickled);
+
+    /* 1) if new's previous cpu is idle, kick it for cache benefit */
+    if ( is_idle_vcpu(curr_on_cpu(new->vcpu->processor)) ) {
+        cpumask_set_cpu(new->vcpu->processor, &prv->tickled);
+        cpu_raise_softirq(new->vcpu->processor, SCHEDULE_SOFTIRQ);
+        return;
+    }
+
+    /* 2) if there are any idle pcpu, kick it */
+    /* The same loop also find the one with lowest priority */
+    for_each_cpu(cpu, &not_tickled) {
+        iter_vc = curr_on_cpu(cpu);
+        if ( is_idle_vcpu(iter_vc) ) {
+            cpumask_set_cpu(cpu, &prv->tickled);
+            cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+            return;
+        }
+        iter_svc = RTGLOBAL_VCPU(iter_vc);
+        if ( scheduled == NULL || 
+            ( prv->priority_scheme == EDF &&
+              iter_svc->cur_deadline > scheduled->cur_deadline) ||
+            ( prv->priority_scheme == RM && 
+              iter_svc->period > schedued->period) ) {
+            scheduled = iter_svc;
+        }
+    }
+
+    /* 3) candicate has higher priority, kick out the lowest priority vcpu */
+    if ( scheduled != NULL && new->cur_deadline < scheduled->cur_deadline ) {
+        cpumask_set_cpu(scheduled->vcpu->processor, &prv->tickled);
+        cpu_raise_softirq(scheduled->vcpu->processor, SCHEDULE_SOFTIRQ);
+    }
+    return;
+}
