@@ -135,3 +135,62 @@ struct rtglobal_dom {
     int    extra;               /* not evaluated */
 };
 
+/*
+ * RunQueue helper functions
+ */
+static int
+__vcpu_on_runq(struct rtglobal_vcpu *svc)
+{
+   return !list_empty(&svc->runq_elem);
+}
+
+static struct rtglobal_vcpu *
+__runq_elem(struct list_head *elem)
+{
+    return list_entry(elem, struct rtglobal_vcpu, runq_elem);
+}
+
+/* lock is grabbed before calling this function */
+static inline void
+__runq_remove(struct rtglobal_vcpu *svc)
+{
+    if ( __vcpu_on_runq(svc) )
+        list_del_init(&svc->runq_elem);
+}
+
+/* Insert vcpu into runq based on vcpu's priority
+ * EDF schedule policy: vcpu with smaller deadline has higher priority
+ * RM schedule policy: vcpu with smaller period has higher priority
+ * Lock is grabbed before calling this function */
+static void
+__runq_insert(const struct scheduler *ops, struct rtglobal_vcpu *svc)
+{
+    struct list_head *runq = RUNQ(ops);
+    struct list_head *iter;
+	struct rtglobal_private *prv = RTGLOBAL_PRIV(ops);
+    ASSERT( spin_is_locked(per_cpu(schedule_data, svc->vcpu->processor).schedule_lock) );
+
+    if ( __vcpu_on_runq(svc) )
+        return;
+
+    list_for_each(iter, runq) {
+        struct rtglobal_vcpu * iter_svc = __runq_elem(iter);
+
+		if ( svc->cur_budget > 0 ) { // svc still has budget
+			if ( iter_svc->cur_budget == 0 ||
+			     ( ( prv->priority_scheme == EDF && svc->cur_deadline <= iter_svc->cur_deadline ) ||
+			       ( prv->priority_scheme == RM && svc->period <= iter_svc->period )) ) {
+					break;
+			}
+		} else { // svc has no budget
+			if ( iter_svc->cur_budget == 0 &&
+			     ( ( prv->priority_scheme == EDF && svc->cur_deadline <= iter_svc->cur_deadline ) ||
+			       ( prv->priority_scheme == RM && svc->period <= iter_svc->period )) ) {
+					break;
+			}
+		}
+    }
+
+    list_add_tail(&svc->runq_elem, iter);
+}
+
