@@ -582,3 +582,30 @@ __runq_pick(const struct scheduler *ops, cpumask_t mask)
 
     return svc;
 }
+
+/* Update vcpu's budget and sort runq by insert the modifed vcpu back to runq
+ * lock is grabbed before calling this function */
+static void
+__repl_update(const struct scheduler *ops, s_time_t now)
+{
+    struct list_head *runq = RUNQ(ops);
+    struct list_head *iter;
+    struct list_head *tmp;
+    struct rtglobal_vcpu *svc = NULL;
+
+    s_time_t diff;
+    long count;
+
+    list_for_each_safe(iter, tmp, runq) {
+        svc = __runq_elem(iter);
+
+        diff = now - svc->cur_deadline;
+        if ( diff > 0 ) {
+            count = (diff/MILLISECS(svc->period)) + 1;
+            svc->cur_deadline += count * MILLISECS(svc->period);
+            svc->cur_budget = svc->budget * 1000;
+            __runq_remove(svc);
+            __runq_insert(ops, svc);
+        }
+    }
+}
