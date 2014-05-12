@@ -416,3 +416,51 @@ rtglobal_dom_destroy(const struct scheduler *ops, struct domain *dom)
 
     rtglobal_free_domdata(ops, RTGLOBAL_DOM(dom));
 }
+
+static void *
+rtglobal_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
+{
+    struct rtglobal_vcpu *svc;
+    s_time_t now = NOW();
+    long count;
+
+    /* Allocate per-VCPU info */
+    svc = xmalloc(struct rtglobal_vcpu);
+    if ( svc == NULL ) {
+        printk("%s, xmalloc failed\n", __func__);
+        return NULL;
+    }
+    memset(svc, 0, sizeof(*svc));
+
+    INIT_LIST_HEAD(&svc->runq_elem);
+    INIT_LIST_HEAD(&svc->sdom_elem);
+    svc->flags = 0U;
+    svc->sdom = dd;
+    svc->vcpu = vc;
+    svc->last_start = 0;            /* init last_start is 0 */
+
+	svc->period = RTGLOBAL_DEFAULT_PERIOD;
+	if ( !is_idle_vcpu(vc) && vc->domain->domain_id != 0 ) {
+		svc->budget = RTGLOBAL_DEFAULT_BUDGET;
+	} else {
+		svc->budget = RTGLOBAL_DEFAULT_PERIOD;
+	}
+
+	count = (now/MILLISECS(svc->period)) + 1;
+	svc->cur_deadline += count*MILLISECS(svc->period); /* sync all VCPU's start time to 0 */
+
+    svc->cur_budget = svc->budget*1000; /* counting in microseconds level */
+    printtime();
+    rtglobal_dump_vcpu(svc);
+
+    return svc;
+}
+
+static void
+rtglobal_free_vdata(const struct scheduler *ops, void *priv)
+{
+    struct rtglobal_vcpu *svc = priv;
+    printtime();
+    rtglobal_dump_vcpu(svc);
+    xfree(svc);
+}
