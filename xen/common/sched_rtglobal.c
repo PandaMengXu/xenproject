@@ -464,3 +464,40 @@ rtglobal_free_vdata(const struct scheduler *ops, void *priv)
     rtglobal_dump_vcpu(svc);
     xfree(svc);
 }
+
+/* Add vcpu to its domain's vcpu list;
+ * Lock is grabbed before calling this function */
+static void
+rtglobal_vcpu_insert(const struct scheduler *ops, struct vcpu *vc)
+{
+    struct rtglobal_vcpu *svc = RTGLOBAL_VCPU(vc);
+
+    printtime();
+    rtglobal_dump_vcpu(svc);
+
+    /* IDLE VCPU not allowed on RunQ */
+    if ( is_idle_vcpu(vc) )
+        return;
+
+    list_add_tail(&svc->sdom_elem, &svc->sdom->vcpu);   /* add to dom vcpu list */
+}
+
+/* Remove vcpu from its domain's vcpu list
+ * Lock is grabbed before calling this function */
+static void
+rtglobal_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
+{
+    struct rtglobal_vcpu * const svc = RTGLOBAL_VCPU(vc);
+    struct rtglobal_dom * const sdom = svc->sdom;
+
+    printtime();
+    rtglobal_dump_vcpu(svc);
+
+    BUG_ON( sdom == NULL );
+    BUG_ON( __vcpu_on_runq(svc) );
+
+    if ( !is_idle_vcpu(vc) ) {
+        list_del_init(&svc->sdom_elem);
+    }
+}
+
