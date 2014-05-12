@@ -340,3 +340,49 @@ rtglobal_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
     printtime();
     printk("cpu=%d\n", cpu);
 }
+
+static void *
+rtglobal_alloc_domdata(const struct scheduler *ops, struct domain *dom)
+{
+    unsigned long flags;
+    struct rtglobal_dom *sdom;
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+
+    printtime();
+    printk("dom=%d\n", dom->domain_id);
+
+    sdom = xmalloc(struct rtglobal_dom);
+    if ( sdom == NULL ) {
+        printk("%s, xmalloc failed\n", __func__);
+        return NULL;
+    }
+    memset(sdom, 0, sizeof(*sdom));
+
+    INIT_LIST_HEAD(&sdom->vcpu);
+    INIT_LIST_HEAD(&sdom->sdom_elem);
+    sdom->dom = dom;
+    sdom->extra = 0;         /* by default, do not allow extra time */
+
+    /* spinlock here to insert the dom */
+    spin_lock_irqsave(&prv->lock, flags);
+    list_add_tail(&sdom->sdom_elem, &(prv->sdom));
+    spin_unlock_irqrestore(&prv->lock, flags);
+
+    return (void *)sdom;
+}
+
+static void
+rtglobal_free_domdata(const struct scheduler *ops, void *data)
+{
+    unsigned long flags;
+    struct rtglobal_dom *sdom = data;
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+
+    printtime();
+    printk("dom=%d\n", sdom->dom->domain_id);
+
+    spin_lock_irqsave(&prv->lock, flags);
+    list_del_init(&sdom->sdom_elem);
+    spin_unlock_irqrestore(&prv->lock, flags);
+    xfree(data);
+}
