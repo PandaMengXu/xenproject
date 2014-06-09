@@ -114,6 +114,12 @@ libxl_tsc_mode = Enumeration("tsc_mode", [
     (3, "native_paravirt"),
     ])
 
+# consistent with xen/include/public/domctl.h
+libxl_schedule_scheme = Enumeration("priority_scheme", [
+    (81, "EDF"),
+    (82, "RM"),
+    ])
+
 # Consistent with the values defined for HVM_PARAM_TIMER_MODE.
 libxl_timer_mode = Enumeration("timer_mode", [
     (-1, "unknown"),
@@ -138,6 +144,7 @@ libxl_scheduler = Enumeration("scheduler", [
     (5, "credit"),
     (6, "credit2"),
     (7, "arinc653"),
+    (8, "rtglobal"),
     ])
 
 # Consistent with SHUTDOWN_* in sched.h (apart from UNKNOWN)
@@ -286,6 +293,19 @@ libxl_domain_restore_params = Struct("domain_restore_params", [
 
 MemKB = UInt(64, init_val = "LIBXL_MEMKB_DEFAULT")
 
+libxl_vcpu = Struct("vcpu",[
+    ("period",       integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_PERIOD_DEFAULT'}),
+    ("budget",       integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_BUDGET_DEFAULT'}),
+    ("extra",        integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_EXTRA_DEFAULT'}),
+    ])
+
+libxl_domain_sched_rtglobal_params = Struct("domain_sched_rtglobal_params",[
+    ("sched",        libxl_scheduler),
+    ("vcpus",        Array(libxl_vcpu, "max_vcpus")),
+    ("num_vcpus",    integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_NUM_VCPUS_DEFAULT'}),
+    ("vcpu_index",   integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_VCPU_INDEX_DEFAULT'}),
+    ])
+
 libxl_domain_sched_params = Struct("domain_sched_params",[
     ("sched",        libxl_scheduler),
     ("weight",       integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_WEIGHT_DEFAULT'}),
@@ -294,6 +314,7 @@ libxl_domain_sched_params = Struct("domain_sched_params",[
     ("slice",        integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_SLICE_DEFAULT'}),
     ("latency",      integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_LATENCY_DEFAULT'}),
     ("extratime",    integer, {'init_val': 'LIBXL_DOMAIN_SCHED_PARAM_EXTRATIME_DEFAULT'}),
+    ("rtglobal",     libxl_domain_sched_rtglobal_params),
     ])
 
 libxl_domain_build_info = Struct("domain_build_info",[
@@ -559,6 +580,12 @@ libxl_cputopology = Struct("cputopology", [
 libxl_sched_credit_params = Struct("sched_credit_params", [
     ("tslice_ms", integer),
     ("ratelimit_us", integer),
+    ], dispose_fn=None)
+
+# consistent with struct xen_sysctl_rtglobal_schedule 
+# in xen/include/public/sysctl.h
+libxl_sched_rtglobal_params = Struct("sched_rtglobal_params", [
+    ("schedule_scheme", uint16),
     ], dispose_fn=None)
 
 libxl_domain_remus_info = Struct("domain_remus_info",[

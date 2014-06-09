@@ -5051,6 +5051,18 @@ int main_sharing(int argc, char **argv)
     return 0;
 }
 
+static uint16_t find_schedule_scheme(const char *p)
+{
+    if(!strcmp(p, "EDF")){
+        return LIBXL_PRIORITY_SCHEME_EDF;
+    }else if(!strcmp(p, "RM")){
+        return LIBXL_PRIORITY_SCHEME_RM;
+    }else{
+        fprintf(stderr, "%s is an invalid schedule policy\n", p);
+        exit(2);
+    }
+}
+
 static int sched_domain_get(libxl_scheduler sched, int domid,
                             libxl_domain_sched_params *scinfo)
 {
@@ -5202,6 +5214,57 @@ static int sched_sedf_domain_output(
     return 0;
 }
 
+static int sched_rtglobal_params_set(libxl_sched_rtglobal_params *scinfo)
+{
+    int rc;
+
+    rc = libxl_sched_rtglobal_params_set(ctx, scinfo);
+    if(rc)
+        fprintf(stderr, "libxl_sched_rtglobal_params_set failed.\n");
+
+    return rc;
+}
+
+static int sched_rtglobal_params_get(libxl_sched_rtglobal_params *scinfo)
+{
+    int rc;
+    rc = libxl_sched_rtglobal_params_get(ctx, scinfo);
+    if(rc)
+        fprintf(stderr, "libxl_rtglobal_rtglobal_get failed.\n");
+
+    return rc;
+}
+
+static int sched_rtglobal_domain_output(
+    int domid)
+{
+    char *domname;
+    libxl_domain_sched_params scinfo;
+    int rc, i;
+
+    if (domid < 0) {
+        printf("%-33s %4s %6s %6s %4s %5s\n", "Name", "ID", "Period", "Budget", "Vcpu", "Extra");
+        return 0;
+    }
+    libxl_domain_sched_params_init(&scinfo);
+    rc = sched_domain_get(LIBXL_SCHEDULER_RTGLOBAL, domid, &scinfo);
+    if (rc)
+        return rc;
+    domname = libxl_domid_to_name(ctx, domid);
+    for( i = 0; i < scinfo.rtglobal.num_vcpus; i++ )
+    {
+        printf("%-33s %4d %6d %6d %4d %5d\n",
+            domname,
+            domid,
+            scinfo.rtglobal.vcpus[i].period,
+            scinfo.rtglobal.vcpus[i].budget,
+            i,
+            scinfo.rtglobal.vcpus[i].extra);
+    }
+    free(domname);
+    libxl_domain_sched_params_dispose(&scinfo);
+    return 0;
+}
 static int sched_default_pool_output(uint32_t poolid)
 {
     char *poolname;
@@ -5558,6 +5621,172 @@ int main_sched_sedf(int argc, char **argv)
                 scinfo.period = 0;
                 scinfo.slice = 0;
             }
+            rc = sched_domain_set(domid, &scinfo);
+            libxl_domain_sched_params_dispose(&scinfo);
+            if (rc)
+                return -rc;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * <nothing>            : List all domain paramters and sched params
+ * -d [domid]           : List domain params for domain
+ * -d [domid] [params]  : Set domain params for domain 
+ * -s show              : List sched priority scheme
+ * -s [params]          : Set sched priority scheme
+ */
+int main_sched_rtglobal(int argc, char **argv)
+{
+    const char *dom = NULL;
+    const char *cpupool = NULL;
+    const char * schedule_scheme = NULL;
+    int opt_s = 0;
+    int period = 10, opt_p = 0;
+    int budget = 4, opt_b = 0;
+    int vcpu_index = 0, opt_v = 0;
+    int extra = 0, opt_e = 0;
+    int opt, rc;
+    static struct option opts[] = {
+        {"domain", 1, 0, 'd'},
+        {"period", 1, 0, 'p'},
+        {"budget", 1, 0, 'b'},
+        {"vcpu", 1, 0, 'v'},
+        {"extra", 1, 0, 'e'},
+        {"schedule", 1, 0, 's'},
+        {"cpupool", 1, 0, 'c'},
+        COMMON_LONG_OPTS,
+        {0, 0, 0, 0}
+    };
+
+    SWITCH_FOREACH_OPT(opt, "d:p:b:v:e:c:s:h", opts, "sched-rtglobal", 0) {
+    case 'd':
+        dom = optarg;
+        break;
+    case 'p':
+        period = strtol(optarg, NULL, 10);
+        opt_p = 1;
+        break;
+    case 'b':
+        budget = strtol(optarg, NULL, 10);
+        opt_b = 1;
+        break;
+    case 'v':
+        vcpu_index = strtol(optarg, NULL, 10);
+        opt_v = 1;
+        break;
+    case 'e':
+        extra = strtol(optarg, NULL, 10);
+        opt_e = 1;
+        break;
+    case 'c':
+        cpupool = optarg;
+        break;
+    case 's':
+        schedule_scheme = optarg;
+        opt_s = 1;
+        break;
+    }
+
+    if ( opt_e ) {
+        fprintf(stderr, "-e not supported yet.\n");
+        return 1;
+    }
+    if (cpupool && (dom || opt_p || opt_b || opt_v || opt_e)) {
+        fprintf(stderr, "Specifying a cpupool is not allowed with other "
+                "options.\n");
+        return 1;
+    }
+    if (!dom && (opt_p || opt_b || opt_v || opt_e)) {
+        fprintf(stderr, "Must specify a domain.\n");
+        return 1;
+    }
+    if ( (opt_v || opt_p || opt_b) && (opt_p + opt_b + opt_v != 3) ) {
+        fprintf(stderr, "Must specify vcpu, period, budget\n");
+        return 1;
+    }
+    if ( opt_s && (opt_p || opt_b || opt_v || opt_e || dom || cpupool)) {
+        fprintf(stderr, "Specifying scheduling algorithm is not allowed "
+                "with other options.\n");
+        return 1;
+    }
+    if ( (opt_p || opt_b) && (!opt_v || !dom) ) {
+        fprintf(stderr, "Must specify a domain and its vcpu index\n");
+        return 1;
+    }
+    
+    if ( opt_s ) {
+        libxl_sched_rtglobal_params scparam;
+        if ( !schedule_scheme || !strcmp(schedule_scheme, "show")) { /* Output schedule scheme */
+            rc = sched_rtglobal_params_get(&scparam);
+            if ( rc ) {
+                fprintf(stderr, "sched_rtglobal_params_get fails\n");
+            }
+        } else {
+            if( !strcmp(schedule_scheme, "EDF") && 
+                !strcmp(schedule_scheme, "RM") ) {
+                fprintf(stderr, "Invalid schedule scheme."
+                                "Only support schedule scheme EDF or RM\n");
+            }
+
+            printf("Input schedule scheme from user is: %s\n", schedule_scheme);
+            scparam.schedule_scheme = find_schedule_scheme(schedule_scheme);
+            rc = sched_rtglobal_params_set(&scparam);
+            if ( rc ) {
+                fprintf(stderr, "sched_rtglobal_params_set fails\n");
+                return -rc;
+            }
+        }
+
+        if ( scparam.schedule_scheme == LIBXL_PRIORITY_SCHEME_EDF ) {
+            printf("Schedule scheme is EDF now\n");
+        } else if ( scparam.schedule_scheme == LIBXL_PRIORITY_SCHEME_RM ) {
+            printf("Schedule scheme is RM now\n");
+        } else {
+            printf("(Set schedule might fail) Set schedule scheme to not EDF or RM\n");
+        }
+        
+        return 0;
+
+    } else if (!dom) { /* list all domain's rtglobal scheduler info */
+        return -sched_domain_output(LIBXL_SCHEDULER_RTGLOBAL,
+                                    sched_rtglobal_domain_output,
+                                    sched_default_pool_output,
+                                    cpupool);
+    } else {
+        uint32_t domid = find_domain(dom);
+        if (!opt_p && !opt_b && !opt_v && !opt_e) { /* output rtglobal scheduler info */
+            sched_rtglobal_domain_output(-1);
+            return -sched_rtglobal_domain_output(domid);
+        } else { /* set rtglobal scheduler paramaters */
+            libxl_domain_sched_params scinfo;
+            libxl_domain_sched_params_init(&scinfo);
+            scinfo.rtglobal.max_vcpus = LIBXL_XEN_LEGACY_MAX_VCPUS;
+             /* TODO: change to the vcpu number of this domain */
+            scinfo.rtglobal.num_vcpus = LIBXL_XEN_LEGACY_MAX_VCPUS;
+            scinfo.rtglobal.vcpus = 
+                (libxl_vcpu*) malloc( sizeof(libxl_vcpu) * scinfo.rtglobal.max_vcpus );
+            if ( scinfo.rtglobal.vcpus == NULL ) {
+                fprintf(stderr, "Alloc memory for scinfo.rtglobal.vcpus fails\n");
+                return 1;
+            }
+            scinfo.sched = LIBXL_SCHEDULER_RTGLOBAL;
+            /* TODO: Change to record the sched scheme */
+            scinfo.rtglobal.sched = LIBXL_SCHEDULER_RTGLOBAL; 
+            if (opt_v)
+                scinfo.rtglobal.vcpu_index = vcpu_index;
+            if (opt_p)
+                scinfo.rtglobal.vcpus[vcpu_index].period = period;
+            if (opt_b)
+                scinfo.rtglobal.vcpus[vcpu_index].budget = budget;
+            if (opt_e)
+                scinfo.rtglobal.vcpus[vcpu_index].extra = extra;
+            printf("User input is -d=%d, -v=%d, -p=%d, -b=%d\n", 
+                    domid, scinfo.rtglobal.vcpu_index, 
+                    scinfo.rtglobal.vcpus[vcpu_index].period,
+                    scinfo.rtglobal.vcpus[vcpu_index].budget);
             rc = sched_domain_set(domid, &scinfo);
             libxl_domain_sched_params_dispose(&scinfo);
             if (rc)
