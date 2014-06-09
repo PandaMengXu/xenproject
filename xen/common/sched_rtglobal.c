@@ -25,6 +25,7 @@
 #include <xen/cpu.h>
 #include <xen/keyhandler.h>
 #include <xen/trace.h>
+#include <xen/guest_access.h>
 
 /*
  * TODO:
@@ -64,9 +65,6 @@
  */
 #define RTGLOBAL_DEFAULT_PERIOD     10
 #define RTGLOBAL_DEFAULT_BUDGET      4
-
-#define EDF							0
-#define RM							1
 
 /*
  * Useful macros
@@ -848,6 +846,115 @@ rtglobal_context_saved(const struct scheduler *ops, struct vcpu *vc)
     vcpu_schedule_unlock_irq(lock, vc);
 }
 
+
+/*
+ * set/get each vcpu info of each domain
+ */
+static int
+rtglobal_dom_cntl(const struct scheduler *ops, struct domain *d, struct xen_domctl_scheduler_op *op)
+{
+    xen_domctl_sched_rtglobal_params_t local_sched;
+    struct rtglobal_dom * const sdom = RTGLOBAL_DOM(d);
+    struct list_head *iter;
+    int vcpu_index = 0;
+    int rc = -EINVAL;
+
+    switch ( op->cmd )
+    {
+    case XEN_DOMCTL_SCHEDOP_getinfo:
+        /* for debug use, whenever adjust Dom0 parameter, do global dump */
+        if ( d->domain_id == 0 ) {
+            rtglobal_dump(ops);
+        }
+
+        local_sched.num_vcpus = 0;
+        list_for_each( iter, &sdom->vcpu ) {
+            struct rtglobal_vcpu * svc = list_entry(iter, struct rtglobal_vcpu, sdom_elem);
+
+            ASSERT(vcpu_index < XEN_LEGACY_MAX_VCPUS);
+            local_sched.vcpus[vcpu_index].budget = svc->budget;
+            local_sched.vcpus[vcpu_index].period = svc->period;
+            local_sched.vcpus[vcpu_index].extra = 0;
+
+            vcpu_index++;
+        }
+        local_sched.num_vcpus = vcpu_index;
+        copy_to_guest(op->u.rtglobal.schedule, &local_sched, 1);
+        rc = 0;
+        break;
+    case XEN_DOMCTL_SCHEDOP_putinfo:
+        copy_from_guest(&local_sched, op->u.rtglobal.schedule, 1);
+        list_for_each( iter, &sdom->vcpu ) {
+            struct rtglobal_vcpu * svc = list_entry(iter, struct rtglobal_vcpu, sdom_elem);
+
+            if ( local_sched.vcpu_index == svc->vcpu->vcpu_id ) { /* adjust per VCPU parameter */
+                vcpu_index = local_sched.vcpu_index;
+
+                if ( vcpu_index < 0 || vcpu_index > XEN_LEGACY_MAX_VCPUS) {
+                    printk("XEN_DOMCTL_SCHEDOP_putinfo: vcpu_index=%d\n",
+                            vcpu_index);
+                }else{
+                    printk("XEN_DOMCTL_SCHEDOP_putinfo: vcpu_index=%d, period=%d, budget=%d\n",
+                            vcpu_index, local_sched.vcpus[vcpu_index].period, 
+                            local_sched.vcpus[vcpu_index].budget);
+                }
+
+                svc->period = local_sched.vcpus[vcpu_index].period;
+                svc->budget = local_sched.vcpus[vcpu_index].budget;
+
+                break;
+            }
+        }
+        rc = 0;
+        break;
+    }
+
+    return rc;
+}
+
+/**
+ * Xen scheduler callback function to perform a global (not domain-specific) adjustment. It is used by the rglobal scheduelr to change or retrieve the priority scheme or the server mechanism.
+ *
+ * @param ops   Pointer to this instance of the scheduler structure
+ * @param sc    Pointer to the scheduler operation specified by Domain 0
+ *
+ */
+static int
+rtglobal_sys_cntl(const struct scheduler *ops,
+                       struct xen_sysctl_scheduler_op *sc)
+{
+    xen_sysctl_rtglobal_schedule_t *params = &sc->u.sched_rtglobal;
+    struct rtglobal_private * prv = RTGLOBAL_PRIV(ops);
+    int rc = -EINVAL;
+    
+    switch( sc->cmd )
+    {
+    case XEN_SYSCTL_SCHEDOP_putinfo:
+        if (params->priority_scheme == XEN_SCHEDULER_RTGLOBAL_EDF ) {
+            printk("Priority scheme changed to EDF\n");
+        } else if ( params->priority_scheme == XEN_SCHEDULER_RTGLOBAL_RM ) {
+            printk("Priority scheme changed to RM\n");
+        } else {
+            printk("Input priority scheme is %d (Not EDF or RM)\n", prv->priority_scheme);
+            rc = -EINVAL;
+        }
+        prv->priority_scheme = params->priority_scheme;
+        rc = 0;
+        break;
+    case XEN_SYSCTL_SCHEDOP_getinfo:
+        params->priority_scheme = prv->priority_scheme;
+        printk("Priority scheme is %d\n", params->priority_scheme);
+        rc = 0;
+        break;
+    default:
+        printk("sc->cmd: no such cmd %d\n", sc->cmd);
+        rc = -EINVAL;
+        break;
+    }
+
+    return rc;
+}
+
 static struct rtglobal_private _rtglobal_priv;
 
 const struct scheduler sched_rtglobal_def = {
@@ -871,7 +978,8 @@ const struct scheduler sched_rtglobal_def = {
     .insert_vcpu    = rtglobal_vcpu_insert,
     .remove_vcpu    = rtglobal_vcpu_remove,
 
-//    .adjust         = rtglobal_dom_cntl,
+    .adjust         = rtglobal_dom_cntl,
+    .adjust_global  = rtglobal_sys_cntl,
 
     .pick_cpu       = rtglobal_cpu_pick,
     .do_schedule    = rtglobal_schedule,
