@@ -69,6 +69,7 @@ static const struct scheduler *schedulers[] = {
     &sched_credit_def,
     &sched_credit2_def,
     &sched_arinc653_def,
+    &sched_rt_def,
 };
 
 static struct scheduler __read_mostly ops;
@@ -1090,7 +1091,8 @@ long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op)
 
     if ( (op->sched_id != DOM2OP(d)->sched_id) ||
          ((op->cmd != XEN_DOMCTL_SCHEDOP_putinfo) &&
-          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo)) )
+          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo) &&
+          (op->cmd != XEN_DOMCTL_SCHEDOP_getnumvcpus)) )
         return -EINVAL;
 
     /* NB: the pluggable scheduler code needs to take care
