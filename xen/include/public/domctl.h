@@ -339,6 +339,20 @@ struct xen_domctl_max_vcpus {
 typedef struct xen_domctl_max_vcpus xen_domctl_max_vcpus_t;
 DEFINE_XEN_GUEST_HANDLE(xen_domctl_max_vcpus_t);
 
+/*
+ * This structure is used to pass to rt scheduler from a 
+ * privileged domain to Xen
+ */
+struct xen_domctl_sched_rt_params {
+    struct {
+        signed long period; /* s_time_t type */
+        signed long budget; 
+    } vcpus[XEN_LEGACY_MAX_VCPUS];
+    uint16_t num_vcpus;
+    uint16_t vcpu_index;
+};
+typedef struct xen_domctl_sched_rt_params xen_domctl_sched_rt_params_t;
+DEFINE_XEN_GUEST_HANDLE(xen_domctl_sched_rt_params_t);
 
 /* XEN_DOMCTL_scheduler_op */
 /* Scheduler types. */
@@ -346,6 +360,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_max_vcpus_t);
 #define XEN_SCHEDULER_CREDIT   5
 #define XEN_SCHEDULER_CREDIT2  6
 #define XEN_SCHEDULER_ARINC653 7
+#define XEN_SCHEDULER_RT       8
+
 /* Set or get info? */
 #define XEN_DOMCTL_SCHEDOP_putinfo 0
 #define XEN_DOMCTL_SCHEDOP_getinfo 1
@@ -367,6 +383,9 @@ struct xen_domctl_scheduler_op {
         struct xen_domctl_sched_credit2 {
             uint16_t weight;
         } credit2;
+        struct xen_domctl_sched_rt{
+            XEN_GUEST_HANDLE_64(xen_domctl_sched_rt_params_t) schedule;
+        } rt;
     } u;
 };
 typedef struct xen_domctl_scheduler_op xen_domctl_scheduler_op_t;
