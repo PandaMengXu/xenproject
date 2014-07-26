@@ -5014,7 +5014,7 @@ static int sched_credit_domain_output(int domid)
     }
     rc = sched_domain_get(LIBXL_SCHEDULER_CREDIT, domid, &scinfo);
     if (rc)
-        return rc;
+        goto out;
     domname = libxl_domid_to_name(ctx, domid);
     printf("%-33s %4d %6d %4d\n",
         domname,
@@ -5022,6 +5022,7 @@ static int sched_credit_domain_output(int domid)
         scinfo.weight,
         scinfo.cap);
     free(domname);
+out:
     libxl_domain_sched_params_dispose(&scinfo);
     return 0;
 }
@@ -5060,13 +5061,14 @@ static int sched_credit2_domain_output(
     }
     rc = sched_domain_get(LIBXL_SCHEDULER_CREDIT2, domid, &scinfo);
     if (rc)
-        return rc;
+        goto out;
     domname = libxl_domid_to_name(ctx, domid);
     printf("%-33s %4d %6d\n",
         domname,
         domid,
         scinfo.weight);
     free(domname);
+out:
     libxl_domain_sched_params_dispose(&scinfo);
     return 0;
 }
@@ -5085,7 +5087,7 @@ static int sched_sedf_domain_output(
     }
     rc = sched_domain_get(LIBXL_SCHEDULER_SEDF, domid, &scinfo);
     if (rc)
-        return rc;
+        goto out;
     domname = libxl_domid_to_name(ctx, domid);
     printf("%-33s %4d %6d %6d %7d %5d %6d\n",
         domname,
@@ -5096,6 +5098,7 @@ static int sched_sedf_domain_output(
         scinfo.extratime,
         scinfo.weight);
     free(domname);
+out:
     libxl_domain_sched_params_dispose(&scinfo);
     return 0;
 }
