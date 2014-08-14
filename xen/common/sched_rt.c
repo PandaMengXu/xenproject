@@ -117,6 +117,17 @@
           smp_processor_id(), now/MICROSECS(1), now%MICROSECS(1)/1000, __func__);} )
 
 /*
+ * rt tracing events ("only" 512 available!). Check
+ * include/public/trace.h for more details.
+ */
+#define TRC_RT_TICKLE           TRC_SCHED_CLASS_EVT(RT, 1)
+#define TRC_RT_RUNQ_PICK        TRC_SCHED_CLASS_EVT(RT, 2)
+#define TRC_RT_BUDGET_BURN      TRC_SCHED_CLASS_EVT(RT, 3)
+#define TRC_RT_BUDGET_REPLENISH TRC_SCHED_CLASS_EVT(RT, 4)
+#define TRC_RT_SCHED_TASKLET    TRC_SCHED_CLASS_EVT(RT, 5)
+#define TRC_RT_VCPU_DUMP        TRC_SCHED_CLASS_EVT(RT, 6)
+
+/*
  * Systme-wide private data, include a global RunQueue
  * The global lock is referenced by schedule_data.schedule_lock from all physical cpus.
  * It can be grabbed via vcpu_schedule_lock_irq()
@@ -229,6 +240,31 @@ rt_dump_vcpu(const struct rt_vcpu *svc)
     memset(cpustr, 0, sizeof(cpustr));
     cpumask_scnprintf(cpustr, sizeof(cpustr), cpupool_scheduler_cpumask(svc->vcpu->domain->cpupool));
     printk("cpupool=%s\n", cpustr);
+
+    /* TRACE */
+    {
+        struct {
+            unsigned dom:16,vcpu:16;
+            unsigned processor;
+            s_time_t period, budget;
+            s_time_t cur_budget, cur_deadline;
+            s_time_t last_start;
+            unsigned is_vcpu_on_runq:16,is_vcpu_runnable:16;
+        } d;
+        d.dom = svc->vcpu->domain->domain_id;
+        d.vcpu = svc->vcpu->vcpu_id;
+        d.processor = svc->vcpu->processor;
+        d.period = svc->period;
+        d.budget = svc->budget;
+        d.cur_budget = svc->cur_budget;
+        d.cur_deadline = svc->cur_deadline;
+        d.last_start = svc->last_start;
+        d.is_vcpu_on_runq = __vcpu_on_runq(svc);
+        d.is_vcpu_runnable = vcpu_runnable(svc->vcpu);
+        trace_var(TRC_RT_VCPU_DUMP, 1,
+                  sizeof(d),
+                  (unsigned char *)&d);
+    }
 }
 
 static void
@@ -624,6 +660,21 @@ burn_budgets(const struct scheduler *ops, struct rt_vcpu *svc, s_time_t now)
         count = ( delta/MICROSECS(svc->period) ) + 1;
         svc->cur_deadline += count * MICROSECS(svc->period);
         svc->cur_budget = svc->budget * 1000;
+
+        /* TRACE */
+        {
+            struct {
+                unsigned dom:16,vcpu:16;
+                s_time_t cur_budget;
+            } d;
+            d.dom = svc->vcpu->domain->domain_id;
+            d.vcpu = svc->vcpu->vcpu_id;
+            d.cur_budget = svc->cur_budget;
+            trace_var(TRC_RT_BUDGET_REPLENISH, 1,
+                      sizeof(d),
+                      (unsigned char *) &d);
+        }
+
         return;
     }
 
@@ -648,6 +699,22 @@ burn_budgets(const struct scheduler *ops, struct rt_vcpu *svc, s_time_t now)
     svc->cur_budget -= delta;
     if ( svc->cur_budget < 0 ) 
         svc->cur_budget = 0;
+
+    /* TRACE */
+    {
+        struct {
+            unsigned dom:16, vcpu:16;
+            s_time_t cur_budget;
+            int delta;
+        } d;
+        d.dom = svc->vcpu->domain->domain_id;
+        d.vcpu = svc->vcpu->vcpu_id;
+        d.cur_budget = svc->cur_budget;
+        d.delta = delta;
+        trace_var(TRC_RT_BUDGET_BURN, 1,
+                  sizeof(d),
+                  (unsigned char *) &d);
+    }
 }
 
 /* 
@@ -682,6 +749,25 @@ __runq_pick(const struct scheduler *ops, cpumask_t mask)
 
         svc = iter_svc;
         break;
+    }
+
+    if( svc == NULL )
+        svc = RT_VCPU(idle_vcpu[0]);
+
+    /* TRACE */
+    {
+        struct {
+            unsigned dom:16, vcpu:16;
+            s_time_t cur_deadline;
+            s_time_t cur_budget;
+        } d;
+        d.dom = svc->vcpu->domain->domain_id;
+        d.vcpu = svc->vcpu->vcpu_id;
+        d.cur_deadline = svc->cur_deadline;
+        d.cur_budget = svc->cur_budget;
+        trace_var(TRC_RT_RUNQ_PICK, 1,
+                  sizeof(d),
+                  (unsigned char *) &d);
     }
 
     return svc;
@@ -750,7 +836,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
         cpumask_clear(&cur_cpu);
         cpumask_set_cpu(cpu, &cur_cpu);
         snext = __runq_pick(ops, cur_cpu);
-        if ( snext == NULL )
+        if ( snext == NULL || is_idle_vcpu(snext->vcpu) )
             snext = RT_VCPU(idle_vcpu[cpu]);
 
         /* if scurr has higher priority and budget, still pick scurr */
@@ -785,6 +871,22 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
 
     ret.time = MILLISECS(1); /* sched quantum */
     ret.task = snext->vcpu;
+
+    /* TRACE */
+    {
+        struct {
+            unsigned dom:16,vcpu:16;
+            s_time_t cur_deadline;
+            s_time_t cur_budget;
+        } d;
+        d.dom = snext->vcpu->domain->domain_id;
+        d.vcpu = snext->vcpu->vcpu_id;
+        d.cur_deadline = snext->cur_deadline;
+        d.cur_budget = snext->cur_budget;
+        trace_var(TRC_RT_SCHED_TASKLET, 1,
+                  sizeof(d),
+                  (unsigned char *)&d);
+    }
 
     return ret;
 }
@@ -882,6 +984,17 @@ runq_tickle(const struct scheduler *ops, struct rt_vcpu *new)
     }
 
 out:
+    /* TRACE */ 
+    {
+        struct {
+            unsigned cpu:8;
+        } d;
+        d.cpu = cpu_to_tickle;
+        trace_var(TRC_RT_TICKLE, 0,
+                  sizeof(d),
+                  (unsigned char *)&d);
+    }
+
     cpumask_set_cpu(cpu_to_tickle, &prv->tickled);
     cpu_raise_softirq(cpu_to_tickle, SCHEDULE_SOFTIRQ);
     return;    
