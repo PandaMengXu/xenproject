@@ -225,6 +225,10 @@ rt_dump_vcpu(const struct rt_vcpu *svc)
     char cpustr[1024];
 
     ASSERT(svc != NULL);
+    /* flag vcpu */
+    if( svc->sdom == NULL )
+        return;
+
     cpumask_scnprintf(cpustr, sizeof(cpustr), svc->vcpu->cpu_hard_affinity);
     printk("[%5d.%-2u] cpu %u, (%"PRId64", %"PRId64"), cur_b=%"PRId64" cur_d=%"PRId64" last_start=%"PRId64" onR=%d runnable=%d cpu_hard_affinity=%s ",
             svc->vcpu->domain->domain_id,
@@ -761,6 +765,9 @@ __runq_pick(const struct scheduler *ops, cpumask_t mask)
         break;
     }
 
+    if( svc == NULL )
+        svc = RT_VCPU(idle_vcpu[0]);
+
     /* TRACE */
     {
         struct {
@@ -846,7 +853,8 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
         cpumask_clear(&cur_cpu);
         cpumask_set_cpu(cpu, &cur_cpu);
         snext = __runq_pick(ops, cur_cpu);
-        if ( snext == NULL || snext->sdom == NULL )
+
+        if ( snext == NULL || is_idle_vcpu(snext->vcpu) )
             snext = RT_VCPU(idle_vcpu[cpu]);
 
         /* if scurr has higher priority and budget, still pick scurr */
