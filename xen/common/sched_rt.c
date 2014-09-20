@@ -222,9 +222,12 @@ rt_dump_vcpu(const struct scheduler *ops, const struct rt_vcpu *svc)
     cpumask_t *cpupool_mask;
 
     ASSERT(svc != NULL);
-    /* flag vcpu */
+    /* idle vcpu */
     if( svc->sdom == NULL )
+    {
+        printk("\n");
         return;
+    }
 
     cpumask_scnprintf(cpustr, sizeof(cpustr), svc->vcpu->cpu_hard_affinity);
     printk("[%5d.%-2u] cpu %u, (%"PRI_stime", %"PRI_stime"),"
@@ -250,13 +253,13 @@ rt_dump_vcpu(const struct scheduler *ops, const struct rt_vcpu *svc)
 static void
 rt_dump_pcpu(const struct scheduler *ops, int cpu)
 {
-    struct rt_private *prv = rt_priv(ops);
+//    struct rt_private *prv = rt_priv(ops);
     struct rt_vcpu *svc = rt_vcpu(curr_on_cpu(cpu));
-    unsigned long flags;
+//    unsigned long flags;
 
-    spin_lock_irqsave(&prv->lock, flags);
+//    spin_lock_irqsave(&prv->lock, flags);
     rt_dump_vcpu(ops, svc);
-    spin_unlock_irqrestore(&prv->lock, flags);
+//    spin_unlock_irqrestore(&prv->lock, flags);
 }
 
 static void
@@ -265,26 +268,18 @@ rt_dump(const struct scheduler *ops)
     struct list_head *iter_sdom, *iter_svc, *runq, *depletedq, *iter;
     struct rt_private *prv = rt_priv(ops);
     struct rt_vcpu *svc;
-    unsigned int cpu = 0;
     cpumask_t *online;
     struct rt_dom *sdom;
     unsigned long flags;
 
     ASSERT(!list_empty(&prv->sdom));
 
-    spin_lock_irqsave(&prv->lock, flags);
     sdom = list_entry(prv->sdom.next, struct rt_dom, sdom_elem);
     online = cpupool_scheduler_cpumask(sdom->dom->cpupool);
     runq = rt_runq(ops);
     depletedq = rt_depletedq(ops);
 
-    printk("PCPU info:\n");
-    for_each_cpu(cpu, online)
-    {
-        svc = rt_vcpu(curr_on_cpu(cpu));
-        rt_dump_vcpu(ops, svc);
-    }
-
+    spin_lock_irqsave(&prv->lock, flags);
     printk("Global RunQueue info:\n");
     list_for_each( iter, runq )
     {
@@ -423,7 +418,8 @@ rt_init(struct scheduler *ops)
     cpumask_clear(&prv->tickled);
 
     ops->sched_data = prv;
-
+ 
+    printk("%s called\n", __FUNCTION__);
     return 0;
 }
 
@@ -432,6 +428,7 @@ rt_deinit(const struct scheduler *ops)
 {
     struct rt_private *prv = rt_priv(ops);
 
+    printk("%s called\n", __FUNCTION__);
     xfree(prv);
 }
 
@@ -443,8 +440,13 @@ static void *
 rt_alloc_pdata(const struct scheduler *ops, int cpu)
 {
     struct rt_private *prv = rt_priv(ops);
+    unsigned long flags;
 
+    spin_lock_irqsave(&prv->lock, flags);
     per_cpu(schedule_data, cpu).schedule_lock = &prv->lock;
+    spin_unlock_irqrestore(&prv->lock, flags);
+    printk("%s cpu=%d prv->lock=%d\n",
+            __FUNCTION__, cpu, prv->lock.raw.lock);
 
     /* 1 indicates alloc. succeed in schedule.c */
     return (void *)1;
@@ -455,13 +457,15 @@ rt_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
 {
     struct rt_private *prv = rt_priv(ops);
     struct schedule_data *sd = &per_cpu(schedule_data, cpu);
-    unsigned long flags;
+//    unsigned long flags;
 
-    spin_lock_irqsave(&prv->lock, flags);
+    printk("%s cpu=%d sd->schedule_lock=%d prv->lock=%d\n",
+            __FUNCTION__, cpu, sd->schedule_lock->raw.lock, prv->lock.raw.lock);
+//    spin_lock_irqsave(&prv->lock, flags);
     /* Move spinlock to the original lock. */
-    ASSERT(!spin_is_locked(&sd->_lock));
-    sd->schedule_lock = &sd->_lock;
-    spin_unlock(&prv->lock);
+//    ASSERT(!spin_is_locked(&sd->_lock));
+//    sd->schedule_lock = &sd->_lock;
+//    spin_unlock_irqrestore(&prv->lock, flags);
 
     return;
 }
@@ -486,6 +490,7 @@ rt_alloc_domdata(const struct scheduler *ops, struct domain *dom)
     list_add_tail(&sdom->sdom_elem, &(prv->sdom));
     spin_unlock_irqrestore(&prv->lock, flags);
 
+    printk("%s called\n", __FUNCTION__);
     return sdom;
 }
 
@@ -496,6 +501,7 @@ rt_free_domdata(const struct scheduler *ops, void *data)
     struct rt_dom *sdom = data;
     struct rt_private *prv = rt_priv(ops);
 
+    printk("%s called\n", __FUNCTION__);
     spin_lock_irqsave(&prv->lock, flags);
     list_del_init(&sdom->sdom_elem);
     spin_unlock_irqrestore(&prv->lock, flags);
@@ -523,6 +529,7 @@ rt_dom_init(const struct scheduler *ops, struct domain *dom)
 static void
 rt_dom_destroy(const struct scheduler *ops, struct domain *dom)
 {
+    printk("%s called\n", __FUNCTION__);
     rt_free_domdata(ops, rt_dom(dom));
 }
 
@@ -550,6 +557,8 @@ rt_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
 
     ASSERT( now >= svc->cur_deadline );
 
+    printk("%s called\n", __FUNCTION__);
+    rt_dump_vcpu(ops, svc);
     rt_update_deadline(now, svc);
 
     return svc;
@@ -559,6 +568,9 @@ static void
 rt_free_vdata(const struct scheduler *ops, void *priv)
 {
     struct rt_vcpu *svc = priv;
+
+    printk("%s called\n", __FUNCTION__);
+    rt_dump_vcpu(ops, svc);
 
     xfree(svc);
 }
@@ -575,6 +587,8 @@ rt_vcpu_insert(const struct scheduler *ops, struct vcpu *vc)
 {
     struct rt_vcpu *svc = rt_vcpu(vc);
 
+    printk("%s called\n", __FUNCTION__);
+    rt_dump_vcpu(ops, svc);
     /* not addlocate idle vcpu to dom vcpu list */
     if ( is_idle_vcpu(vc) )
         return;
@@ -597,6 +611,9 @@ rt_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
     struct rt_dom * const sdom = svc->sdom;
 
     BUG_ON( sdom == NULL );
+
+    printk("%s called\n", __FUNCTION__);
+    rt_dump_vcpu(ops, svc);
 
     if ( __vcpu_on_q(svc) )
         __q_remove(svc);
@@ -836,7 +853,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
         }
     }
 
-    ret.time = MIN(snext->budget, MAX_SCHEDULE); /* sched quantum */
+    ret.time = MAX_SCHEDULE; /* sched quantum */
     ret.task = snext->vcpu;
 
     /* TRACE */
