@@ -369,10 +369,14 @@ __runq_insert(const struct scheduler *ops, struct rt_vcpu *svc)
     struct rt_private *prv = rt_priv(ops);
     struct list_head *runq = rt_runq(ops);
     struct list_head *iter;
+    s_time_t now = NOW();
 
     ASSERT( spin_is_locked(&prv->lock) );
 
     ASSERT( !__vcpu_on_q(svc) );
+
+    if ( now >= svc->cur_deadline )
+        rt_update_deadline(now, svc);
 
     /* add svc to runq if svc still has budget */
     if ( svc->cur_budget > 0 )
@@ -528,8 +532,6 @@ rt_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
 
     ASSERT( now >= svc->cur_deadline );
 
-    rt_update_deadline(now, svc);
-
     return svc;
 }
 
@@ -577,7 +579,12 @@ rt_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
     BUG_ON( sdom == NULL );
 
     if ( __vcpu_on_q(svc) )
+    {
+        spinlock_t *lock;
+        lock = vcpu_schedule_lock_irq(vc);
         __q_remove(svc);
+        vcpu_schedule_unlock_irq(lock, vc);
+    }
 
     if ( !is_idle_vcpu(vc) )
         list_del_init(&svc->sdom_elem);
@@ -733,7 +740,6 @@ __repl_update(const struct scheduler *ops, s_time_t now)
         if ( now < svc->cur_deadline )
             break;
 
-        rt_update_deadline(now, svc);
         /* reinsert the vcpu if its deadline is updated */
         __q_remove(svc);
         __runq_insert(ops, svc);
@@ -744,7 +750,6 @@ __repl_update(const struct scheduler *ops, s_time_t now)
         svc = __q_elem(iter);
         if ( now >= svc->cur_deadline )
         {
-            rt_update_deadline(now, svc);
             __q_remove(svc); /* remove from depleted queue */
             __runq_insert(ops, svc); /* add to runq */
         }
@@ -979,9 +984,6 @@ rt_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
         return;
     }
 
-    if ( now >= svc->cur_deadline)
-        rt_update_deadline(now, svc);
-
     /* insert svc to runq/depletedq because svc is not in queue now */
     __runq_insert(ops, svc);
 
@@ -1042,11 +1044,14 @@ rt_dom_cntl(
     struct domain *d,
     struct xen_domctl_scheduler_op *op)
 {
+    struct rt_private *prv = rt_priv(ops);
     struct rt_dom * const sdom = rt_dom(d);
     struct rt_vcpu *svc;
     struct list_head *iter;
+    unsigned long flags;
     int rc = 0;
 
+    spin_lock_irqsave(&prv->lock, flags);
     switch ( op->cmd )
     {
     case XEN_DOMCTL_SCHEDOP_getinfo:
@@ -1055,6 +1060,12 @@ rt_dom_cntl(
         op->u.rtds.budget = svc->budget / MICROSECS(1);
         break;
     case XEN_DOMCTL_SCHEDOP_putinfo:
+        if ( op->u.rtds.period == 0 || op->u.rtds.budget == 0 )
+        {
+            rc = -EINVAL;
+            break;
+        }
+
         list_for_each( iter, &sdom->vcpu )
         {
             struct rt_vcpu * svc = list_entry(iter, struct rt_vcpu, sdom_elem);
@@ -1063,6 +1074,8 @@ rt_dom_cntl(
         }
         break;
     }
+
+    spin_unlock_irqrestore(&prv->lock, flags);
 
     return rc;
 }
