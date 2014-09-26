@@ -1045,8 +1045,10 @@ rt_dom_cntl(
     struct rt_dom * const sdom = rt_dom(d);
     struct rt_vcpu *svc;
     struct list_head *iter;
+    unsigned long flags;
     int rc = 0;
 
+    spin_lock_irqsave(&prv->lock, flags);
     switch ( op->cmd )
     {
     case XEN_DOMCTL_SCHEDOP_getinfo:
@@ -1055,6 +1057,12 @@ rt_dom_cntl(
         op->u.rtds.budget = svc->budget / MICROSECS(1);
         break;
     case XEN_DOMCTL_SCHEDOP_putinfo:
+        if ( op->u.rtds.period == 0 || op->u.rtds.budget == 0 )
+        {
+            ret = -EINVAL;
+            break;
+        }
+
         list_for_each( iter, &sdom->vcpu )
         {
             struct rt_vcpu * svc = list_entry(iter, struct rt_vcpu, sdom_elem);
@@ -1063,6 +1071,8 @@ rt_dom_cntl(
         }
         break;
     }
+
+    spin_unlock_irqrestore(&prv->lock, flags);
 
     return rc;
 }
