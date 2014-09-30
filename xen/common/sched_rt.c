@@ -1042,9 +1042,11 @@ rt_dom_cntl(
     struct domain *d,
     struct xen_domctl_scheduler_op *op)
 {
+    struct rt_private *prv = rt_priv(ops);
     struct rt_dom * const sdom = rt_dom(d);
     struct rt_vcpu *svc;
     struct list_head *iter;
+    unsigned long flags;
     int rc = 0;
 
     switch ( op->cmd )
@@ -1055,12 +1057,19 @@ rt_dom_cntl(
         op->u.rtds.budget = svc->budget / MICROSECS(1);
         break;
     case XEN_DOMCTL_SCHEDOP_putinfo:
+        if ( op->u.rtds.period == 0 || op->u.rtds.budget == 0 )
+        {
+            rc = -EINVAL;
+            break;
+        }
+        spin_lock_irqsave(&prv->lock, flags);
         list_for_each( iter, &sdom->vcpu )
         {
             struct rt_vcpu * svc = list_entry(iter, struct rt_vcpu, sdom_elem);
             svc->period = MICROSECS(op->u.rtds.period); /* transfer to nanosec */
             svc->budget = MICROSECS(op->u.rtds.budget);
         }
+        spin_unlock_irqrestore(&prv->lock, flags);
         break;
     }
 
