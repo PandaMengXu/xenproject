@@ -21,6 +21,7 @@ INSTALL_SBIN-$(CONFIG_X86)     += xen-hvmcrash
 INSTALL_SBIN-$(CONFIG_X86)     += xen-hvmctx
 INSTALL_SBIN-$(CONFIG_X86)     += xen-lowmemd
 INSTALL_SBIN-$(CONFIG_X86)     += xen-mfndump
+INSTALL_SBIN                   += xen-vcpu-dedicate
 INSTALL_SBIN                   += xen-ringwatch
 INSTALL_SBIN                   += xen-tmem-list-parse
 INSTALL_SBIN                   += xencov
@@ -92,6 +93,11 @@ xen-hptool: xen-hptool.o
 xen-mfndump.o: CFLAGS += -I$(XEN_ROOT)/tools/libxc
 xen-mfndump: xen-mfndump.o
 	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(APPEND_LDFLAGS)
+
+# xen-vcpu-dedicate incorrectly uses libxc internals
+xen-vcpu-dedicate.o: CFLAGS += -I$(XEN_ROOT)/tools/libxc
+xen-vcpu-dedicate: xen-vcpu-dedicate.o
+	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
 
 xenwatchdogd: xenwatchdogd.o
 	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
