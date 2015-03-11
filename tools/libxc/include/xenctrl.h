@@ -888,6 +888,9 @@ int xc_sched_rtds_domain_set(xc_interface *xch,
 int xc_sched_rtds_domain_get(xc_interface *xch,
                             uint32_t domid,
                             struct xen_domctl_sched_rtds *sdom);
+int xc_sched_rtds_domain_set_dedvcpu(xc_interface *xch,
+                                    uint32_t domid,
+                                    struct xen_domctl_sched_rtds *sdom);
 
 int
 xc_sched_arinc653_schedule_set(
