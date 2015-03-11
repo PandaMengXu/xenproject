@@ -38,6 +38,9 @@
 #include <public/sched.h>
 #include <xsm/xsm.h>
 
+#define TRUE            1
+#define FALSE           0
+
 /* opt_sched: scheduler - default to credit */
 static char __initdata opt_sched[10] = "credit";
 string_param("sched", opt_sched);
@@ -63,6 +66,7 @@ static void poll_timer_fn(void *data);
 /* This is global for now so that private implementations can reach it */
 DEFINE_PER_CPU(struct schedule_data, schedule_data);
 DEFINE_PER_CPU(struct scheduler *, scheduler);
+DEFINE_PER_CPU(struct cpu_d_status, cpu_d_status);
 
 static const struct scheduler *schedulers[] = {
     &sched_sedf_def,
@@ -1094,7 +1098,9 @@ long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op)
 
     if ( (op->sched_id != DOM2OP(d)->sched_id) ||
          ((op->cmd != XEN_DOMCTL_SCHEDOP_putinfo) &&
-          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo)) )
+          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo) &&
+          (op->cmd != XEN_DOMCTL_SCHEDOP_add_dedvcpu) &&
+          (op->cmd != XEN_DOMCTL_SCHEDOP_remove_dedvcpu)) )
         return -EINVAL;
 
     /* NB: the pluggable scheduler code needs to take care
@@ -1310,11 +1316,13 @@ static void poll_timer_fn(void *data)
 static int cpu_schedule_up(unsigned int cpu)
 {
     struct schedule_data *sd = &per_cpu(schedule_data, cpu);
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     per_cpu(scheduler, cpu) = &ops;
     spin_lock_init(&sd->_lock);
     sd->schedule_lock = &sd->_lock;
     sd->curr = idle_vcpu[cpu];
+    spin_lock_init(&cpu_d_status->d_status_lock);
     init_timer(&sd->s_timer, s_timer_fn, NULL, cpu);
     atomic_set(&sd->urgent_count, 0);
 
