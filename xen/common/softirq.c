@@ -16,6 +16,7 @@
 #include <xen/sched.h>
 #include <xen/rcupdate.h>
 #include <xen/softirq.h>
+#include <xen/sched-if.h>
 
 #ifndef __ARCH_IRQ_STAT
 irq_cpustat_t irq_stat[NR_CPUS];
@@ -30,6 +31,8 @@ static void __do_softirq(unsigned long ignore_mask)
 {
     unsigned int i, cpu;
     unsigned long pending;
+    struct cpu_d_status *cpu_d_status;
+//    unsigned long flags;
 
     for ( ; ; )
     {
@@ -38,6 +41,7 @@ static void __do_softirq(unsigned long ignore_mask)
          * us to another processor.
          */
         cpu = smp_processor_id();
+        cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
         if ( rcu_pending(cpu) )
             rcu_check_callbacks(cpu);
@@ -48,6 +52,21 @@ static void __do_softirq(unsigned long ignore_mask)
 
         i = find_first_set_bit(pending);
         clear_bit(i, &softirq_pending(cpu));
+
+        /* Not raise sched irq on dedicated cpu */
+        if ( i == SCHEDULE_SOFTIRQ )
+        {
+//            spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+            if ( cpu_d_status->d_status == SCHED_CPU_D_STATUS_ENABLED )
+            {
+                if ( per_cpu(scheduler, cpu)->sched_id != XEN_SCHEDULER_RTDS )
+                    printk("WARNING: Not RTDS sched for dedicated CPU\r\n");
+//                spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+                continue;
+            }
+//            spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+        }
+
         (*softirq_handlers[i])();
     }
 }

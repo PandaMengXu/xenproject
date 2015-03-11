@@ -233,6 +233,9 @@ struct vcpu
     /* Bitmask of CPUs on which this VCPU prefers to run. */
     cpumask_var_t    cpu_soft_affinity;
 
+    /* Status if VCPU is dedicated to a CPU */
+    bool_t           d_status;
+
     /* Bitmask of CPUs which are holding onto this VCPU's state. */
     cpumask_var_t    vcpu_dirty_cpumask;
 
