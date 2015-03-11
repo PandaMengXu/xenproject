@@ -38,6 +38,9 @@
 #include <public/sched.h>
 #include <xsm/xsm.h>
 
+#define TRUE            1
+#define FALSE           0
+
 /* opt_sched: scheduler - default to credit */
 static char __initdata opt_sched[10] = "credit";
 string_param("sched", opt_sched);
@@ -1094,7 +1097,8 @@ long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op)
 
     if ( (op->sched_id != DOM2OP(d)->sched_id) ||
          ((op->cmd != XEN_DOMCTL_SCHEDOP_putinfo) &&
-          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo)) )
+          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo) &&
+          (op->cmd != XEN_DOMCTL_SCHEDOP_putinfo_dedvcpu)) )
         return -EINVAL;
 
     /* NB: the pluggable scheduler code needs to take care
@@ -1150,6 +1154,108 @@ static void vcpu_periodic_timer_work(struct vcpu *v)
     migrate_timer(&v->periodic_timer, smp_processor_id());
     set_timer(&v->periodic_timer, periodic_next_event);
 }
+
+/**
+ * Dirty hack for deciated vcpu 
+ * TODO: may need to put the d_status to vcpu and per_cpu data
+ * instead of sched specific data
+ */
+struct rt_pcpu {
+    uint8_t d_status; /* status for dedicated vcpu */
+};
+
+struct rt_vcpu {
+    struct list_head q_elem;    /* on the runq/depletedq list */
+    struct list_head sdom_elem; /* on the domain VCPU list */
+
+    /* Up-pointers */
+    struct rt_dom *sdom;
+    struct vcpu *vcpu;
+
+    /* VCPU parameters, in nanoseconds */
+    s_time_t period;
+    s_time_t budget;
+
+    /* VCPU current infomation in nanosecond */
+    s_time_t cur_budget;        /* current budget */
+    s_time_t last_start;        /* last start time */
+    s_time_t cur_deadline;      /* current deadline for EDF */
+
+    unsigned flags;             /* mark __RTDS_scheduled, etc.. */
+
+    bool_t d_status;
+    int d_cpu;
+};
+
+/*
+ * Check if the cpu scheduler should be disabled.
+ * The cpu scheduler should be disabled if
+ * 1) ops is RTDS scheduler
+ * 2) cpu is in SCHED_DED_VCPU_DONE status
+ * 3) vc d_status (dedicated vcpu) is true
+ */
+static bool_t has_vcpu_dedicated_to_cpu(const struct scheduler *ops, struct vcpu *vc, unsigned int cpu)
+{
+    struct schedule_data *sd;
+    struct rt_pcpu       *spc;
+    cpumask_t            cpumask;
+    int                  pcpu;
+
+    /* Only RTDS sched has dedicated vcpu func now */
+    if ( ops->sched_id != XEN_SCHEDULER_RTDS )
+        return FALSE;
+    /* cpu is not in SCHED_DED_VCPU_DONE status */
+    sd = &per_cpu(schedule_data, cpu);
+    spc = sd->sched_priv;
+    ASSERT( spc != NULL );
+    if ( spc->d_status != SCHED_DED_VCPU_DONE )
+        return FALSE;
+    /* vcpu is not dedicated */
+    cpumask = *vc->cpu_hard_affinity;
+    pcpu = cpumask_first(&cpumask);
+    cpumask_clear_cpu(pcpu, &cpumask);
+    if ( !cpumask_empty(&cpumask) || vc->sched_priv == NULL )
+        return FALSE;
+    /* Dedicated VCPU is not on the cpu */
+    if ( pcpu != cpu )
+        return FALSE;
+
+    return TRUE;
+}
+
+/*
+ * Disable the rtds scheduler on cpu when dedicated VCPU has benn put
+ * on the cpu
+ */
+static void pcpu_schedule_disable(const struct scheduler *ops, unsigned int cpu)
+{
+    struct schedule_data *sd;
+
+    /* Only RTDS sched has dedicated vcpu func now */
+    if ( ops->sched_id != XEN_SCHEDULER_RTDS )
+        return;
+
+    sd = &per_cpu(schedule_data, cpu);
+    stop_timer(&sd->s_timer); /* no longer trigger scheduler by cpu itself */
+}
+
+/*
+ * Reenable the rtds scheduler on cpu
+ */
+//static void pcpu_schedule_enable(const struct scheduler *ops, unsigned int cpu)
+//{
+//    struct schedule_data *sd;
+//    struct vcpu          *vcpu;
+//    s_time_t             now = NOW(); 
+//
+//    if ( ops->sched_id != XEN_SCHEDULER_RTDS )
+//        return;
+//
+//    sd = &per_cpu(schedule_data, cpu);
+//    vcpu = curr_on_cpu(cpu);
+//    set_timer(&sd->s_timer, now); /* enable timer */
+//    cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ); /* should we raise IRQ here? */
+//}
 
 /* 
  * The main function
@@ -1211,6 +1317,10 @@ static void schedule(void)
     {
         pcpu_schedule_unlock_irq(lock, cpu);
         trace_continue_running(next);
+        if ( unlikely(has_vcpu_dedicated_to_cpu(sched, next, cpu)) )
+        {
+            pcpu_schedule_disable(sched, cpu);
+        }
         return continue_running(prev);
     }
 
@@ -1258,6 +1368,11 @@ static void schedule(void)
 
     vcpu_periodic_timer_work(next);
 
+    if ( unlikely(has_vcpu_dedicated_to_cpu(sched, next, cpu)) )
+    {
+        pcpu_schedule_disable(sched, cpu);
+    }
+    /* schedule_tail() must be the last func to jump out of hypervisor */
     context_switch(prev, next);
 }
 
