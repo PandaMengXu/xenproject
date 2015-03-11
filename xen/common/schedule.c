@@ -38,6 +38,9 @@
 #include <public/sched.h>
 #include <xsm/xsm.h>
 
+#define TRUE            1
+#define FALSE           0
+
 /* opt_sched: scheduler - default to credit */
 static char __initdata opt_sched[10] = "credit";
 string_param("sched", opt_sched);
@@ -63,6 +66,7 @@ static void poll_timer_fn(void *data);
 /* This is global for now so that private implementations can reach it */
 DEFINE_PER_CPU(struct schedule_data, schedule_data);
 DEFINE_PER_CPU(struct scheduler *, scheduler);
+DEFINE_PER_CPU(struct cpu_d_status, cpu_d_status);
 
 static const struct scheduler *schedulers[] = {
     &sched_sedf_def,
@@ -703,6 +707,8 @@ int vcpu_set_soft_affinity(struct vcpu *v, const cpumask_t *affinity)
 void vcpu_block(void)
 {
     struct vcpu *v = current;
+    int cpu = smp_processor_id();
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     set_bit(_VPF_blocked, &v->pause_flags);
 
@@ -714,6 +720,7 @@ void vcpu_block(void)
     else
     {
         TRACE_2D(TRC_SCHED_BLOCK, v->domain->domain_id, v->vcpu_id);
+        cpu_d_status->vcpu_block_count++;
         raise_softirq(SCHEDULE_SOFTIRQ);
     }
 }
@@ -731,6 +738,8 @@ static long do_poll(struct sched_poll *sched_poll)
     evtchn_port_t  port;
     long           rc;
     unsigned int   i;
+    int cpu = smp_processor_id();
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     /* Fairly arbitrary limit. */
     if ( sched_poll->nr_ports > 128 )
@@ -785,6 +794,7 @@ static long do_poll(struct sched_poll *sched_poll)
         set_timer(&v->poll_timer, sched_poll->timeout);
 
     TRACE_2D(TRC_SCHED_BLOCK, d->domain_id, v->vcpu_id);
+    cpu_d_status->do_poll_count++;
     raise_softirq(SCHEDULE_SOFTIRQ);
 
     return 0;
@@ -801,11 +811,14 @@ long vcpu_yield(void)
 {
     struct vcpu * v=current;
     spinlock_t *lock = vcpu_schedule_lock_irq(v);
+    int cpu = smp_processor_id();
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     SCHED_OP(VCPU2OP(v), yield, v);
     vcpu_schedule_unlock_irq(lock, v);
 
     TRACE_2D(TRC_SCHED_YIELD, current->domain->domain_id, current->vcpu_id);
+    cpu_d_status->vcpu_yield_count++;
     raise_softirq(SCHEDULE_SOFTIRQ);
     return 0;
 }
@@ -1094,7 +1107,9 @@ long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op)
 
     if ( (op->sched_id != DOM2OP(d)->sched_id) ||
          ((op->cmd != XEN_DOMCTL_SCHEDOP_putinfo) &&
-          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo)) )
+          (op->cmd != XEN_DOMCTL_SCHEDOP_getinfo) &&
+          (op->cmd != XEN_DOMCTL_SCHEDOP_add_dedvcpu) &&
+          (op->cmd != XEN_DOMCTL_SCHEDOP_remove_dedvcpu)) )
         return -EINVAL;
 
     /* NB: the pluggable scheduler code needs to take care
@@ -1151,6 +1166,176 @@ static void vcpu_periodic_timer_work(struct vcpu *v)
     set_timer(&v->periodic_timer, periodic_next_event);
 }
 
+/*
+ * Check if the cpu scheduler should be disabled.
+ * The cpu scheduler should be disabled if
+ * 1) ops is RTDS scheduler
+ * 2) cpu is in SCHED_DED_VCPU_DONE status
+ * 3) vc d_status (dedicated vcpu) is true
+ */
+static bool_t has_vcpu_dedicated_to_cpu(
+    const struct scheduler *ops, struct vcpu *vc, unsigned int cpu)
+{
+    struct cpu_d_status  *cpu_d_status;
+    cpumask_t            cpumask;
+    int                  pcpu;
+    unsigned long        flags;
+
+    /* Only RTDS sched has dedicated vcpu func now */
+    if ( ops->sched_id != XEN_SCHEDULER_RTDS )
+        return FALSE;
+
+    /* cpu is not in SCHED_CPU_D_STATUS_ENABLE status */
+    cpu_d_status = &per_cpu(cpu_d_status, cpu);
+    spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+    if ( cpu_d_status->d_status != SCHED_CPU_D_STATUS_ENABLED )
+    {
+        spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+        return FALSE;
+    }
+    spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+
+    /* vcpu is not dedicated */
+    if ( vc->d_status != TRUE )
+        return FALSE;
+
+    cpumask = *vc->cpu_hard_affinity;
+    pcpu = cpumask_first(&cpumask);
+    cpumask_clear_cpu(pcpu, &cpumask);
+    /* cpu is not the only bit in vc cpu_hard_affinity */
+    if ( !cpumask_empty(&cpumask) || pcpu != cpu )
+        return FALSE;
+
+    /* Dirty hack to count the call num */
+    if ( cpu_d_status->sched_disabled == TRUE )
+        return FALSE;
+
+    return TRUE;
+}
+
+static int get_cpu_d_status(const struct scheduler *ops, unsigned int cpu)
+{
+    struct cpu_d_status  *cpu_d_status;
+    int d_status;
+    unsigned long flags;
+
+    cpu_d_status = &per_cpu(cpu_d_status, cpu);
+    spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+    d_status = cpu_d_status->d_status;
+    spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+
+    return d_status;
+}
+
+/*
+ * Disable the scheduler on the dedicated cpu
+ * NB: Only work for RTDS scheduler for now.
+ */
+static void pcpu_schedule_disable(
+    const struct scheduler *ops, unsigned int cpu)
+{
+//    struct schedule_data *sd;
+    struct vcpu *v;
+    struct cpu_d_status *cpu_d_status;
+    s_time_t now = NOW();
+
+    /* Only RTDS sched has dedicated vcpu func now */
+    if ( ops->sched_id != XEN_SCHEDULER_RTDS )
+        return;
+
+    cpu_d_status = &per_cpu(cpu_d_status, cpu);
+//    sd = &per_cpu(schedule_data, cpu);
+    v = curr_on_cpu(cpu);
+
+    ASSERT( cpu_d_status->d_status == SCHED_CPU_D_STATUS_ENABLED );
+    ASSERT( v->d_status == TRUE );
+    ASSERT( cpu_d_status->vcpu != NULL );
+
+    /* should disable the callback; reverse is init_timer() */
+//    kill_timer(&sd->s_timer);
+//    kill_timer(&v->periodic_timer);
+//    kill_timer(&v->singleshot_timer);
+//    kill_timer(&v->poll_timer);
+
+    /* dirty hack to count call num */
+    cpu_d_status->sched_disabled = TRUE;
+
+    printk("%s: cpu %d and vcpu %d timer has been disabled\n",
+           __FUNCTION__, cpu, v->vcpu_id);
+    printk("cpu %d has invoked %ld SCHED_SOFTIRQ (sched) within %"PRI_stime" ns\n"
+           "tasklet_enqueue(%ld), do_tasklet(%ld), s_timer_fn(%ld), do_pool(%ld)\n"
+           "vcpu_yield(%ld), vcpu_block(%ld)\n",
+           cpu, cpu_d_status->count, now - cpu_d_status->start,
+           cpu_d_status->tasklet_enqueue_count, cpu_d_status->do_tasklet_count,
+           cpu_d_status->s_timer_fn_count, cpu_d_status->do_poll_count,
+           cpu_d_status->vcpu_yield_count, cpu_d_status->vcpu_block_count);
+
+    cpu_d_status->start = now;
+    cpu_d_status->count = 0;
+    cpu_d_status->tasklet_enqueue_count = 0;
+    cpu_d_status->do_tasklet_count = 0;
+    cpu_d_status->s_timer_fn_count = 0;
+    cpu_d_status->do_poll_count = 0;
+    cpu_d_status->vcpu_yield_count = 0;
+    cpu_d_status->vcpu_block_count = 0;
+}
+
+/*
+ * Reenable the rtds scheduler on cpu
+ */
+static void pcpu_schedule_enable(const struct scheduler *ops, unsigned int cpu)
+{
+//    struct schedule_data *sd;
+    struct vcpu          *v;
+    struct cpu_d_status *cpu_d_status;
+    s_time_t             now = NOW();
+
+    if ( ops->sched_id != XEN_SCHEDULER_RTDS )
+        return;
+
+    cpu_d_status = &per_cpu(cpu_d_status, cpu);
+//    sd = &per_cpu(schedule_data, cpu);
+    v = curr_on_cpu(cpu);
+
+    ASSERT( cpu_d_status->d_status == SCHED_CPU_D_STATUS_RESTORE );
+
+//    init_timer(&sd->s_timer, s_timer_fn, NULL, cpu);
+//    init_timer(&v->periodic_timer, vcpu_periodic_timer_fn,
+//               v, v->processor);
+//    init_timer(&v->singleshot_timer, vcpu_singleshot_timer_fn,
+//               v, v->processor);
+//    init_timer(&v->poll_timer, poll_timer_fn,
+//               v, v->processor);
+//    set_timer(&sd->s_timer, now); /* enable timer */
+//    set_timer(&v->periodic_timer, now);
+//    set_timer(&v->singleshot_timer, now);
+//    set_timer(&v->poll_timer, now);
+    cpu_d_status->d_status = SCHED_CPU_D_STATUS_DISABLED;
+    cpu_d_status->sched_disabled = FALSE;
+    cpu_d_status->vcpu = NULL;
+
+    printk("%s: cpu %d and vcpu %d timer has been enabled\n",
+           __FUNCTION__, cpu, v->vcpu_id);
+    printk("cpu %d has invoked %ld SCHED_SOFTIRQ (nooh) within %"PRI_stime" ns\n"
+           "tasklet_enqueue(%ld), do_tasklet(%ld), s_timer_fn(%ld), do_pool(%ld)\n"
+           "vcpu_yield(%ld), vcpu_block(%ld)\n",
+           cpu, cpu_d_status->count, now - cpu_d_status->start,
+           cpu_d_status->tasklet_enqueue_count, cpu_d_status->do_tasklet_count,
+           cpu_d_status->s_timer_fn_count, cpu_d_status->do_poll_count,
+           cpu_d_status->vcpu_yield_count, cpu_d_status->vcpu_block_count);
+
+    cpu_d_status->start = now;
+    cpu_d_status->count = 0;
+    cpu_d_status->tasklet_enqueue_count = 0;
+    cpu_d_status->do_tasklet_count = 0;
+    cpu_d_status->s_timer_fn_count = 0;
+    cpu_d_status->do_poll_count = 0;
+    cpu_d_status->vcpu_yield_count = 0;
+    cpu_d_status->vcpu_block_count = 0;
+
+//    cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ); /* should not raise IRQ on same pcpu */
+}
+
 /* 
  * The main function
  * - deschedule the current domain (scheduler independent).
@@ -1167,6 +1352,7 @@ static void schedule(void)
     spinlock_t           *lock;
     struct task_slice     next_slice;
     int cpu = smp_processor_id();
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     ASSERT_NOT_IN_ATOMIC();
 
@@ -1192,12 +1378,31 @@ static void schedule(void)
         BUG();
     }
 
+    /* Not do sched operation on dedicated cpu */
+//  spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+//    if ( cpu_d_status->d_status == SCHED_CPU_D_STATUS_ENABLED )
+//    {
+//        if ( per_cpu(scheduler, cpu)->sched_id != XEN_SCHEDULER_RTDS )
+//            printk("WARNING: Not RTDS sched for dedicated CPU\r\n");
+//                spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+//        next = prev;
+//        trace_continue_running(next);
+//        return continue_running(prev);
+//    }
+    cpu_d_status->count++;
+//  spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+
+    /* Do schedule */
+    sched = this_cpu(scheduler);
+
+    if ( unlikely(get_cpu_d_status(sched, cpu) == SCHED_CPU_D_STATUS_RESTORE) )
+        pcpu_schedule_enable(sched, cpu);
+
     lock = pcpu_schedule_lock_irq(cpu);
 
     stop_timer(&sd->s_timer);
     
     /* get policy-specific decision on scheduling... */
-    sched = this_cpu(scheduler);
     next_slice = sched->do_schedule(sched, now, tasklet_work_scheduled);
 
     next = next_slice.task;
@@ -1211,6 +1416,8 @@ static void schedule(void)
     {
         pcpu_schedule_unlock_irq(lock, cpu);
         trace_continue_running(next);
+        if ( unlikely(has_vcpu_dedicated_to_cpu(sched, next, cpu)) )
+            pcpu_schedule_disable(sched, cpu);
         return continue_running(prev);
     }
 
@@ -1258,6 +1465,9 @@ static void schedule(void)
 
     vcpu_periodic_timer_work(next);
 
+    if ( unlikely(has_vcpu_dedicated_to_cpu(sched, next, cpu)) )
+        pcpu_schedule_disable(sched, cpu);
+    /* schedule_tail() must be the last func to jump out of hypervisor */
     context_switch(prev, next);
 }
 
@@ -1280,6 +1490,10 @@ void context_saved(struct vcpu *prev)
 /* The scheduler timer: force a run through the scheduler */
 static void s_timer_fn(void *unused)
 {
+    int cpu = smp_processor_id();
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
+
+    cpu_d_status->s_timer_fn_count++;
     raise_softirq(SCHEDULE_SOFTIRQ);
     SCHED_STAT_CRANK(sched_irq);
 }
@@ -1310,11 +1524,13 @@ static void poll_timer_fn(void *data)
 static int cpu_schedule_up(unsigned int cpu)
 {
     struct schedule_data *sd = &per_cpu(schedule_data, cpu);
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     per_cpu(scheduler, cpu) = &ops;
     spin_lock_init(&sd->_lock);
     sd->schedule_lock = &sd->_lock;
     sd->curr = idle_vcpu[cpu];
+    spin_lock_init(&cpu_d_status->d_status_lock);
     init_timer(&sd->s_timer, s_timer_fn, NULL, cpu);
     atomic_set(&sd->urgent_count, 0);
 

@@ -16,6 +16,7 @@
 #include <xen/config.h>
 #include <xen/init.h>
 #include <xen/sched.h>
+#include <xen/sched-if.h>
 #include <xen/softirq.h>
 #include <xen/tasklet.h>
 #include <xen/cpu.h>
@@ -34,6 +35,7 @@ static DEFINE_SPINLOCK(tasklet_lock);
 static void tasklet_enqueue(struct tasklet *t)
 {
     unsigned int cpu = t->scheduled_on;
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     if ( t->is_softirq )
     {
@@ -48,7 +50,10 @@ static void tasklet_enqueue(struct tasklet *t)
         unsigned long *work_to_do = &per_cpu(tasklet_work_to_do, cpu);
         list_add_tail(&t->list, &per_cpu(tasklet_list, cpu));
         if ( !test_and_set_bit(_TASKLET_enqueued, work_to_do) )
+        {
+            cpu_d_status->tasklet_enqueue_count++;
             cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+        }
     }
 }
 
@@ -110,6 +115,7 @@ void do_tasklet(void)
     unsigned int cpu = smp_processor_id();
     unsigned long *work_to_do = &per_cpu(tasklet_work_to_do, cpu);
     struct list_head *list = &per_cpu(tasklet_list, cpu);
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
 
     /*
      * Work must be enqueued *and* scheduled. Otherwise there is no work to
@@ -124,7 +130,8 @@ void do_tasklet(void)
 
     if ( list_empty(list) )
     {
-        clear_bit(_TASKLET_enqueued, work_to_do);        
+        clear_bit(_TASKLET_enqueued, work_to_do);
+        cpu_d_status->do_tasklet_count++;
         raise_softirq(SCHEDULE_SOFTIRQ);
     }
 

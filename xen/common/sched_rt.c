@@ -26,6 +26,7 @@
 #include <xen/keyhandler.h>
 #include <xen/trace.h>
 #include <xen/guest_access.h>
+#include <public/sched.h>
 
 /*
  * TODO:
@@ -78,6 +79,8 @@
  *    vcpu_insert, vcpu_remove, context_saved, __runq_insert
  */
 
+#define TRUE                    1
+#define FALSE                   0
 
 /*
  * Default parameters:
@@ -135,6 +138,7 @@ struct rt_private {
     struct list_head runq;      /* ordered list of runnable vcpus */
     struct list_head depletedq; /* unordered list of depleted vcpus */
     cpumask_t tickled;          /* cpus been tickled */
+    cpumask_t dedcpus;          /* dedicated cpus not involved in sched */
 };
 
 /*
@@ -213,6 +217,31 @@ __q_elem(struct list_head *elem)
 }
 
 /*
+ * A VCPU is dedicated on a cpu if
+ * 1) The VCPU is set as a dedicated VCPU
+ * 2) cpu is the only cpu in VCPU's cpu_hard_affinity
+ * NB: A dedicated VCPU always has budget == period
+ */ 
+static bool_t is_vcpu_dedicated_on_cpu(const struct rt_vcpu *svc, const int cpu)
+{
+    cpumask_t cpumask = *svc->vcpu->cpu_hard_affinity;
+    int pcpu = cpumask_first(&cpumask);
+
+    if ( svc->vcpu->d_status != TRUE )
+        return FALSE;
+    ASSERT( svc->budget == svc->period );
+
+    if ( pcpu != cpu )
+        return FALSE;
+
+    cpumask_clear_cpu(cpu, &cpumask);
+    if ( !cpumask_empty(&cpumask) )
+        return FALSE;
+
+    return TRUE;
+}
+
+/*
  * Debug related code, dump vcpu/cpu information
  */
 static void
@@ -223,11 +252,11 @@ rt_dump_vcpu(const struct scheduler *ops, const struct rt_vcpu *svc)
 
     ASSERT(svc != NULL);
     /* idle vcpu */
-    if( svc->sdom == NULL )
-    {
-        printk("\n");
-        return;
-    }
+//    if( svc->sdom == NULL )
+//    {
+//        printk("\n");
+//        return;
+//    }
 
     cpumask_scnprintf(cpustr, sizeof(cpustr), svc->vcpu->cpu_hard_affinity);
     printk("[%5d.%-2u] cpu %u, (%"PRI_stime", %"PRI_stime"),"
@@ -412,6 +441,7 @@ rt_init(struct scheduler *ops)
     INIT_LIST_HEAD(&prv->depletedq);
 
     cpumask_clear(&prv->tickled);
+    cpumask_clear(&prv->dedcpus);
 
     ops->sched_data = prv;
 
@@ -441,7 +471,24 @@ rt_alloc_pdata(const struct scheduler *ops, int cpu)
     spin_unlock_irqrestore(&prv->lock, flags);
 
     /* 1 indicates alloc. succeed in schedule.c */
-    return (void *)1;
+    return (void*) 1;
+}
+
+static void
+rt_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
+{
+    struct rt_private *prv = rt_priv(ops);
+    struct schedule_data *sd = &per_cpu(schedule_data, cpu);
+    unsigned long flags;
+
+    /* Move spinlock to the original lock */
+    spin_lock_irqsave(&prv->lock, flags);
+    ASSERT(sd->schedule_lock == &prv->lock);
+    ASSERT(!spin_is_locked(&sd->_lock));
+    sd->schedule_lock = &sd->_lock;
+    spin_unlock_irqrestore(&prv->lock, flags);
+
+    return;
 }
 
 static void *
@@ -474,6 +521,10 @@ rt_free_domdata(const struct scheduler *ops, void *data)
     struct rt_dom *sdom = data;
     struct rt_private *prv = rt_priv(ops);
 
+    /* idle domain */
+    if ( data == NULL )
+        return;
+
     spin_lock_irqsave(&prv->lock, flags);
     list_del_init(&sdom->sdom_elem);
     spin_unlock_irqrestore(&prv->lock, flags);
@@ -504,6 +555,10 @@ rt_dom_destroy(const struct scheduler *ops, struct domain *dom)
     rt_free_domdata(ops, rt_dom(dom));
 }
 
+/**
+ * NB: upper-pointer of svc to vc is set outside of rt_alloc_vdata
+ * Refer to sched_move_domain() for detailed reason
+ */
 static void *
 rt_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
 {
@@ -529,11 +584,31 @@ rt_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
 }
 
 static void
-rt_free_vdata(const struct scheduler *ops, void *priv)
+rt_free_vdata(const struct scheduler *ops, void *vcpudata)
 {
-    struct rt_vcpu *svc = priv;
+    struct rt_vcpu *svc = vcpudata;
+//    struct vcpu *vc = svc->vcpu;
+    struct rt_private *prv = rt_priv(ops);
+    struct cpu_d_status *cpu_d_status;
+//    spinlock_t *lock;
+    unsigned long flags;
+    int cpu = cpumask_first(svc->vcpu->cpu_hard_affinity);
 
+//    lock = vcpu_schedule_lock_irq(vc);
+
+    if ( svc->vcpu->d_status == FALSE )
+        goto out;
+
+    cpu_d_status = &per_cpu(cpu_d_status, cpu);
+    spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+    cpu_d_status->d_status = SCHED_CPU_D_STATUS_DISABLED;
+    spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+    cpumask_clear_cpu(cpu, &prv->dedcpus);
+
+ out:
+    printk("on cpu %d svc=%08lx is set to NULL\n", cpu, (unsigned long) svc);
     xfree(svc);
+//    vcpu_schedule_unlock_irq(lock, vc);
 }
 
 /*
@@ -573,16 +648,24 @@ rt_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
     struct rt_vcpu * const svc = rt_vcpu(vc);
     struct rt_dom * const sdom = svc->sdom;
     spinlock_t *lock;
+    int cpu = smp_processor_id();
 
+    BUG_ON( svc == NULL );
     BUG_ON( sdom == NULL );
 
+    printk("on cpu %d: vcpu %d svc=%08lx, sdom=%08lx\n",
+            cpu, vc->vcpu_id, (unsigned long) svc, (unsigned long) sdom);
     lock = vcpu_schedule_lock_irq(vc);
+    printk("on cpu %d: lock = %08lx locked\n", cpu, (unsigned long) lock);
     if ( __vcpu_on_q(svc) )
         __q_remove(svc);
-    vcpu_schedule_unlock_irq(lock, vc);
 
+    printk("on cpu %d: lock = %08lx unlocked\n", cpu, (unsigned long) lock);
     if ( !is_idle_vcpu(vc) )
         list_del_init(&svc->sdom_elem);
+
+    vcpu_schedule_unlock_irq(lock, vc);
+    printk("on cpu %d: end of rt_vcpu_remove\n", cpu);
 }
 
 /*
@@ -595,10 +678,13 @@ rt_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
 {
     cpumask_t cpus;
     cpumask_t *online;
+    struct rt_private *prv;
     int cpu;
 
+    prv = rt_priv(ops);
     online = cpupool_scheduler_cpumask(vc->domain->cpupool);
     cpumask_and(&cpus, online, vc->cpu_hard_affinity);
+    cpumask_andnot(&cpus, &cpus, &prv->dedcpus);
 
     cpu = cpumask_test_cpu(vc->processor, &cpus)
             ? vc->processor
@@ -669,9 +755,11 @@ __runq_pick(const struct scheduler *ops, const cpumask_t *mask)
     struct list_head *iter;
     struct rt_vcpu *svc = NULL;
     struct rt_vcpu *iter_svc = NULL;
+    struct rt_private *prv;
     cpumask_t cpu_common;
     cpumask_t *online;
 
+    prv = rt_priv(ops);
     list_for_each(iter, runq)
     {
         iter_svc = __q_elem(iter);
@@ -680,6 +768,7 @@ __runq_pick(const struct scheduler *ops, const cpumask_t *mask)
         online = cpupool_scheduler_cpumask(iter_svc->vcpu->domain->cpupool);
         cpumask_and(&cpu_common, online, iter_svc->vcpu->cpu_hard_affinity);
         cpumask_and(&cpu_common, mask, &cpu_common);
+        cpumask_andnot(&cpu_common, &cpu_common, &prv->dedcpus);
         if ( cpumask_empty(&cpu_common) )
             continue;
 
@@ -754,6 +843,71 @@ __repl_update(const struct scheduler *ops, s_time_t now)
 }
 
 /*
+ * Return the dedicated VCPU of cpu as snext, if
+ * the dedicated VCPU is not running on another cpu now;
+ * return NULL, otherwise;
+ */
+static struct rt_vcpu *
+__enable_dedicated_cpu_prepare(const struct scheduler *ops, const int cpu)
+{
+    struct rt_private *prv = rt_priv(ops);
+    struct rt_vcpu *const scurr = rt_vcpu(curr_on_cpu(cpu));
+    struct rt_vcpu *snext = NULL;
+    struct rt_vcpu *svc;
+    struct rt_dom  *sdom;
+    struct list_head *iter_sdom, *iter_svc;
+    struct cpu_d_status *cpu_d_status;
+    int pcpu;
+
+    /*
+     * In order to disable schedule on cpu:
+     * 1) Put the dedicated VCPU on the cpu; handle two scenarios:
+     *    The dedicated VCPU is the current VCPU on the cpu; or
+     *    The dedicated VCPU is not on the cpu now.
+     * 2) Set the cpu SCHED_CPU_D_STATUS_ENABLED
+     */
+    pcpu = cpumask_first(scurr->vcpu->cpu_hard_affinity);
+    cpu_d_status = &per_cpu(cpu_d_status, cpu);
+    if ( scurr->vcpu->d_status == TRUE && pcpu == cpu )
+    {
+        cpu_d_status->d_status = SCHED_CPU_D_STATUS_ENABLED;
+        snext = scurr;
+        cpu_d_status->vcpu = snext->vcpu;
+        goto out;
+    }
+    /* current VCPU on cpu is not the dedicated VCPU */
+    list_for_each( iter_sdom, &prv->sdom )
+    {
+        sdom = list_entry(iter_sdom, struct rt_dom, sdom_elem);
+
+        list_for_each( iter_svc, &sdom->vcpu )
+        {
+            svc = list_entry(iter_svc, struct rt_vcpu, sdom_elem);
+            if ( is_vcpu_dedicated_on_cpu(svc, cpu) != TRUE )
+                continue;
+
+            /*
+             * If the dedicated VCPU is running on another cpu,
+             * notify that cpu to reschedule
+             */
+            if ( svc->vcpu->runstate.state == RUNSTATE_running )
+            {
+                cpu_raise_softirq(svc->vcpu->processor, SCHEDULE_SOFTIRQ);
+                goto out;
+            }
+
+            cpu_d_status->d_status = SCHED_CPU_D_STATUS_ENABLED;
+            snext = svc;
+            cpu_d_status->vcpu = snext->vcpu;
+            goto out;
+        }
+    }
+
+out:
+    return snext;
+}
+
+/*
  * schedule function for rt scheduler.
  * The lock is already grabbed in schedule.c, no need to lock here
  */
@@ -764,7 +918,60 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
     struct rt_private *prv = rt_priv(ops);
     struct rt_vcpu *const scurr = rt_vcpu(current);
     struct rt_vcpu *snext = NULL;
+    struct vcpu *vcpu = NULL;
     struct task_slice ret = { .migrated = 0 };
+    struct cpu_d_status *cpu_d_status = &per_cpu(cpu_d_status, cpu);
+    unsigned long flags;
+
+    ASSERT( cpu_d_status != NULL );
+
+    /* fast path on dedicated cpu */
+    if ( unlikely(cpu_d_status->d_status == SCHED_CPU_D_STATUS_ENABLED) )
+    {
+        spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+        vcpu = cpu_d_status->vcpu; /* always dedicated vcpu */
+        spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+
+        ASSERT( !is_idle_vcpu(vcpu) );
+        ASSERT( vcpu != NULL );
+
+        if ( !vcpu_runnable(current) )
+        {
+            ret.task = idle_vcpu[cpu];
+        }
+        else
+        {
+            ret.task = vcpu;
+        }
+        ret.time = -1; /* -ve means unlimited */
+        return ret; /* skip trace on dedicated pcpu */
+    }
+
+    /* test if cpu is dedicated cpu */
+    spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+    if ( unlikely(cpu_d_status->d_status == SCHED_CPU_D_STATUS_ENABLED) )
+    {
+        printk("WARNING: cpu %d d_status is SCHED_CPU_D_STATUS_ENABLED.\r\n",
+               cpu);
+    }
+
+    if ( unlikely(cpu_d_status->d_status == SCHED_CPU_D_STATUS_INIT) )
+    {
+        printk("cpu %d is in SCHED_CPU_D_STATUS_INIT.\r\n", cpu);
+
+        snext = __enable_dedicated_cpu_prepare(ops, cpu);
+        spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+
+        if ( snext != NULL )
+        {
+            /* exclude dedicate cpu from schedule decision */
+            cpumask_set_cpu(cpu, &prv->dedcpus);
+            goto out;
+        }
+    }
+    else
+        spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+
 
     /* clear ticked bit now that we've been scheduled */
     cpumask_clear_cpu(cpu, &prv->tickled);
@@ -774,6 +981,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
 
     __repl_update(ops, now);
 
+     /* not dedicated CPU */
     if ( tasklet_work_scheduled )
     {
         snext = rt_vcpu(idle_vcpu[cpu]);
@@ -787,6 +995,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
         /* if scurr has higher priority and budget, still pick scurr */
         if ( !is_idle_vcpu(current) &&
              vcpu_runnable(current) &&
+             cpumask_test_cpu(cpu, current->cpu_hard_affinity) &&
              scurr->cur_budget > 0 &&
              ( is_idle_vcpu(snext->vcpu) ||
                scurr->cur_deadline <= snext->cur_deadline ) )
@@ -813,6 +1022,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
         }
     }
 
+out:
     ret.time = MIN(snext->budget, MAX_SCHEDULE); /* sched quantum */
     ret.task = snext->vcpu;
 
@@ -891,6 +1101,7 @@ runq_tickle(const struct scheduler *ops, struct rt_vcpu *new)
     online = cpupool_scheduler_cpumask(new->vcpu->domain->cpupool);
     cpumask_and(&not_tickled, online, new->vcpu->cpu_hard_affinity);
     cpumask_andnot(&not_tickled, &not_tickled, &prv->tickled);
+    cpumask_andnot(&not_tickled, &not_tickled, &prv->dedcpus);  
 
     /* 1) if new's previous cpu is idle, kick it for cache benefit */
     if ( is_idle_vcpu(curr_on_cpu(new->vcpu->processor)) )
@@ -958,8 +1169,16 @@ rt_vcpu_wake(const struct scheduler *ops, struct vcpu *vc)
     struct rt_vcpu *snext = NULL; /* highest priority on RunQ */
     struct rt_dom *sdom = NULL;
     cpumask_t *online;
+    int pcpu;
 
     BUG_ON( is_idle_vcpu(vc) );
+
+    if ( unlikely(vc->d_status == TRUE) )
+    {
+        pcpu = cpumask_first(vc->cpu_hard_affinity);
+        cpu_raise_softirq(pcpu, SCHEDULE_SOFTIRQ);
+        return;
+    }
 
     if ( unlikely(curr_on_cpu(vc->processor) == vc) )
         return;
@@ -1044,9 +1263,14 @@ rt_dom_cntl(
     struct rt_private *prv = rt_priv(ops);
     struct rt_dom * const sdom = rt_dom(d);
     struct rt_vcpu *svc;
+    struct cpu_d_status *cpu_d_status;
     struct list_head *iter;
+    struct list_head *iter_svc;
     unsigned long flags;
+    cpumask_t cpumask;
+    int cpu;
     int rc = 0;
+    s_time_t now;
 
     switch ( op->cmd )
     {
@@ -1072,6 +1296,81 @@ rt_dom_cntl(
         }
         spin_unlock_irqrestore(&prv->lock, flags);
         break;
+    case XEN_DOMCTL_SCHEDOP_add_dedvcpu:
+        if ( op->u.rtds.vcpuid < 0 )
+        {
+            rc = -EINVAL;
+            break;
+        }
+        spin_lock_irqsave(&prv->lock, flags);
+        list_for_each( iter_svc, &sdom->vcpu )
+        {
+            svc = list_entry(iter_svc, struct rt_vcpu, sdom_elem);
+            if ( svc->vcpu->vcpu_id == op->u.rtds.vcpuid )
+            {
+                /* Sanity check */
+                cpumask = *svc->vcpu->cpu_hard_affinity;
+                cpu = cpumask_first(&cpumask);
+                cpumask_clear_cpu(cpu, &cpumask);
+                if ( !cpumask_empty(&cpumask) )
+                {
+                    printk("Dedicated VCPU must be pin to only one cpu\r\n");
+                    rc = -EINVAL;
+                    break;
+                }
+                /* Set dedicated VCPU */
+                if ( svc->budget != svc->period )
+                {
+                    printk("WARNING: dedicated VCPU budget must equal to period!"
+                           "Forcely set budget = period\r\n");
+                    rc = -EINVAL;
+                    break;
+                }
+                svc->vcpu->d_status = TRUE;
+                cpu_d_status = &per_cpu(cpu_d_status, cpu);
+                spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+                cpu_d_status->d_status = SCHED_CPU_D_STATUS_INIT;
+                spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+                printk("cpu %d d_status is set to INIT\n", cpu);
+            }
+        }
+        spin_unlock_irqrestore(&prv->lock, flags);
+        break;
+    case XEN_DOMCTL_SCHEDOP_remove_dedvcpu:
+        rc = -EINVAL;
+        if ( op->u.rtds.vcpuid < 0 )
+            break;
+        now = NOW();
+        spin_lock_irqsave(&prv->lock, flags);
+        list_for_each( iter_svc, &sdom->vcpu )
+        {
+            svc = list_entry(iter_svc, struct rt_vcpu, sdom_elem);
+            if ( svc->vcpu->vcpu_id == op->u.rtds.vcpuid )
+            {
+                cpumask = *svc->vcpu->cpu_hard_affinity;
+                cpu = cpumask_first(&cpumask);
+                if ( svc->vcpu->d_status != TRUE )
+                    break;
+                svc->vcpu->d_status = FALSE;
+                cpu_d_status = &per_cpu(cpu_d_status, cpu);
+                spin_lock_irqsave(&cpu_d_status->d_status_lock, flags);
+                cpu_d_status->d_status = SCHED_CPU_D_STATUS_RESTORE;
+                spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
+                cpumask_clear_cpu(cpu, &prv->dedcpus);
+                if ( now >= svc->cur_deadline )
+                    rt_update_deadline(now, svc);
+                rc = 0;
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&prv->lock, flags);
+        /* resched on cpu after unlock because hypercall may run on the cpu */
+        if ( rc == 0 )
+        {
+            ASSERT( cpu >= 0 );
+            cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+        }
+        break;
     }
 
     return rc;
@@ -1090,6 +1389,7 @@ const struct scheduler sched_rtds_def = {
     .init           = rt_init,
     .deinit         = rt_deinit,
     .alloc_pdata    = rt_alloc_pdata,
+    .free_pdata     = rt_free_pdata,
     .alloc_domdata  = rt_alloc_domdata,
     .free_domdata   = rt_free_domdata,
     .init_domain    = rt_dom_init,

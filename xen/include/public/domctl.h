@@ -364,8 +364,10 @@ DEFINE_XEN_GUEST_HANDLE(xen_domctl_max_vcpus_t);
 #define XEN_SCHEDULER_RTDS     8
 
 /* Set or get info? */
-#define XEN_DOMCTL_SCHEDOP_putinfo 0
-#define XEN_DOMCTL_SCHEDOP_getinfo 1
+#define XEN_DOMCTL_SCHEDOP_putinfo          0
+#define XEN_DOMCTL_SCHEDOP_getinfo          1
+#define XEN_DOMCTL_SCHEDOP_add_dedvcpu      2
+#define XEN_DOMCTL_SCHEDOP_remove_dedvcpu   3
 struct xen_domctl_scheduler_op {
     uint32_t sched_id;  /* XEN_SCHEDULER_* */
     uint32_t cmd;       /* XEN_DOMCTL_SCHEDOP_* */
@@ -387,6 +389,7 @@ struct xen_domctl_scheduler_op {
         struct xen_domctl_sched_rtds {
             uint32_t period;
             uint32_t budget;
+            uint16_t vcpuid; /* only for dedicated vcpu */
         } rtds;
     } u;
 };

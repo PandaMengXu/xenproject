@@ -21,6 +21,17 @@ extern cpumask_t cpupool_free_cpus;
 #define SCHED_DEFAULT_RATELIMIT_US 1000
 extern int sched_ratelimit_us;
 
+/*
+ * d_cpu_status of a cpu
+ * SCHED_CPU_D_STATUS_DISABLED: No dedicated VCPU
+ * SCHED_CPU_D_STATUS_INIT: Dedicated VCPU is just set but not set up on pcpu yet.
+ * SCHED_CPU_D_STATUS_ENABLED: The pcpu run the dedicated VCPU now and
+ * its scheduler is disabled
+ */
+#define SCHED_CPU_D_STATUS_DISABLED     0
+#define SCHED_CPU_D_STATUS_INIT         1
+#define SCHED_CPU_D_STATUS_ENABLED      2
+#define SCHED_CPU_D_STATUS_RESTORE      3
 
 /*
  * In order to allow a scheduler to remap the lock->cpu mapping,
@@ -46,6 +57,7 @@ struct schedule_data {
 DECLARE_PER_CPU(struct schedule_data, schedule_data);
 DECLARE_PER_CPU(struct scheduler *, scheduler);
 DECLARE_PER_CPU(struct cpupool *, cpupool);
+DECLARE_PER_CPU(struct cpu_d_status, cpu_d_status);
 
 #define sched_lock(kind, param, cpu, irq, arg...) \
 static inline spinlock_t *kind##_schedule_lock##irq(param EXTRA_TYPE(arg)) \
@@ -115,6 +127,21 @@ struct task_slice {
     struct vcpu *task;
     s_time_t     time;
     bool_t       migrated;
+};
+
+struct cpu_d_status {
+    struct vcpu *vcpu;                  /* dedicated vcpu */
+    uint8_t     d_status;
+    spinlock_t  d_status_lock;
+    uint8_t     sched_disabled;
+    s_time_t    start;
+    unsigned long count;
+    unsigned long tasklet_enqueue_count;
+    unsigned long do_tasklet_count;
+    unsigned long s_timer_fn_count;
+    unsigned long do_poll_count;
+    unsigned long vcpu_yield_count;
+    unsigned long vcpu_block_count;
 };
 
 struct scheduler {
