@@ -63,3 +63,41 @@ int xc_sched_rtds_domain_get(xc_interface *xch,
 
     return rc;
 }
+
+int xc_sched_rtds_domain_add_dedvcpu(xc_interface *xch,
+                                    uint32_t domid,
+                                    struct xen_domctl_sched_rtds *sdom)
+{
+    int rc;
+    DECLARE_DOMCTL;
+
+    domctl.cmd = XEN_DOMCTL_scheduler_op;
+    domctl.domain = (domid_t) domid;
+    domctl.u.scheduler_op.sched_id = XEN_SCHEDULER_RTDS;
+    domctl.u.scheduler_op.cmd = XEN_DOMCTL_SCHEDOP_add_dedvcpu;
+    domctl.u.scheduler_op.u.rtds.vcpuid = sdom->vcpuid;
+    domctl.u.scheduler_op.u.rtds.period = sdom->period;
+    domctl.u.scheduler_op.u.rtds.budget = sdom->budget;
+
+    rc = do_domctl(xch, &domctl);
+
+    return rc;
+}
+
+int xc_sched_rtds_domain_remove_dedvcpu(xc_interface *xch,
+                                       uint32_t domid,
+                                       struct xen_domctl_sched_rtds *sdom)
+{
+    int rc;
+    DECLARE_DOMCTL;
+
+    domctl.cmd = XEN_DOMCTL_scheduler_op;
+    domctl.domain = (domid_t) domid;
+    domctl.u.scheduler_op.sched_id = XEN_SCHEDULER_RTDS;
+    domctl.u.scheduler_op.cmd = XEN_DOMCTL_SCHEDOP_remove_dedvcpu;
+    domctl.u.scheduler_op.u.rtds.vcpuid = sdom->vcpuid;
+
+    rc = do_domctl(xch, &domctl);
+
+    return rc;
+}
