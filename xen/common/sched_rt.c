@@ -269,7 +269,7 @@ rt_dump_vcpu(const struct scheduler *ops, const struct rt_vcpu *svc)
     cpumask_scnprintf(cpustr, sizeof(cpustr), svc->vcpu->cpu_hard_affinity);
     printk("[%5d.%-2u] cpu %u, (%"PRI_stime", %"PRI_stime"),"
            " cur_b=%"PRI_stime" cur_d=%"PRI_stime" last_start=%"PRI_stime"\n"
-           " \t\t onQ=%d runnable=%d cpu_hard_affinity=%s ",
+           " \t\t onQ=%d runnable=%d cpu_hard_affinity=%s d_status=%c",
             svc->vcpu->domain->domain_id,
             svc->vcpu->vcpu_id,
             svc->vcpu->processor,
@@ -280,7 +280,8 @@ rt_dump_vcpu(const struct scheduler *ops, const struct rt_vcpu *svc)
             svc->last_start,
             __vcpu_on_q(svc),
             vcpu_runnable(svc->vcpu),
-            cpustr);
+            cpustr,
+            svc->d_status);
     memset(cpustr, 0, sizeof(cpustr));
     cpupool_mask = cpupool_scheduler_cpumask(svc->vcpu->domain->cpupool);
     cpumask_scnprintf(cpustr, sizeof(cpustr), cpupool_mask);
@@ -293,6 +294,54 @@ rt_dump_pcpu(const struct scheduler *ops, int cpu)
     struct rt_vcpu *svc = rt_vcpu(curr_on_cpu(cpu));
 
     rt_dump_vcpu(ops, svc);
+}
+
+/*
+ * Lock has been acquired by caller.
+ * Just for DEBUG
+ */
+static void
+__rt_dump(const struct scheduler *ops)
+{
+    struct list_head *iter_sdom, *iter_svc, *runq, *depletedq, *iter;
+    struct rt_private *prv = rt_priv(ops);
+    struct rt_vcpu *svc;
+    cpumask_t *online;
+    struct rt_dom *sdom;
+
+    ASSERT(!list_empty(&prv->sdom));
+
+    sdom = list_entry(prv->sdom.next, struct rt_dom, sdom_elem);
+    online = cpupool_scheduler_cpumask(sdom->dom->cpupool);
+    runq = rt_runq(ops);
+    depletedq = rt_depletedq(ops);
+
+    printk("Global RunQueue info:\n");
+    list_for_each( iter, runq )
+    {
+        svc = __q_elem(iter);
+        rt_dump_vcpu(ops, svc);
+    }
+
+    printk("Global DepletedQueue info:\n");
+    list_for_each( iter, depletedq )
+    {
+        svc = __q_elem(iter);
+        rt_dump_vcpu(ops, svc);
+    }
+
+    printk("Domain info:\n");
+    list_for_each( iter_sdom, &prv->sdom )
+    {
+        sdom = list_entry(iter_sdom, struct rt_dom, sdom_elem);
+        printk("\tdomain: %d\n", sdom->dom->domain_id);
+
+        list_for_each( iter_svc, &sdom->vcpu )
+        {
+            svc = list_entry(iter_svc, struct rt_vcpu, sdom_elem);
+            rt_dump_vcpu(ops, svc);
+        }
+    }
 }
 
 static void
@@ -871,10 +920,11 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
     {
         if ( unlikely(spc->d_status != SCHED_DED_VCPU_NONE) )
         {
+            printk("cpu %d d_status is not SCHED_DED_VCPU_NONE.\r\n", cpu);
+            __rt_dump(ops);
             if ( spc->d_status != SCHED_DED_VCPU_INIT )
             {
-                rt_dump(ops);
-                BUG();
+                printk("WARNING: cpu %d d_status is %d\r\n", cpu, spc->d_status);
             }
 
             /* Disable scheduler in schedule() */
@@ -884,6 +934,8 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
             {
                 spc->d_status = SCHED_DED_VCPU_DONE;
                 snext = scurr;
+                printk("dom %d vcpu %d is on cpu %d now. set pcpu %d as SCHED_DED_VCPU_DONE\r\n",
+                        scurr->sdom->dom->domain_id, scurr->vcpu->vcpu_id, cpu, cpu);
                 goto out;
             }
             /* otherwise, find the dedicated VCPU and return as snext */
@@ -896,6 +948,8 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
 
                 spc->d_status = SCHED_DED_VCPU_DONE;
                 snext = svc;
+                printk("dom %d vcpu %d is on runq now. set pcpu %d as SCHED_DED_VCPU_DONE\r\n",
+                        snext->sdom->dom->domain_id, scurr->vcpu->vcpu_id, cpu);
                 goto out;
             }
             depletedq = rt_depletedq(ops);
@@ -908,6 +962,8 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
                 printk("WARNING: dedicated VCPU should never deplete.\r\n");
                 spc->d_status = SCHED_DED_VCPU_DONE;
                 snext = svc;
+                printk("dom %d vcpu %d is on depletedq now. set pcpu %d as SCHED_DED_VCPU_DONE\r\n",
+                        snext->sdom->dom->domain_id, scurr->vcpu->vcpu_id, cpu);
                 goto out;
             }
             /* In case dedicated vcpu on another cpu, notify that cpu to sched */
@@ -919,7 +975,11 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
                 svc = vcpu->sched_priv;
                 if ( is_vcpu_dedicated_on_cpu(svc, cpu) != TRUE )
                     continue;
+
+                printk("dom %d vcpu %d is on another cpu %d now. Delay set current cpu %d as SCHED_DED_VCPU_DONE\r\n",
+                        svc->sdom->dom->domain_id, scurr->vcpu->vcpu_id, i, cpu);
                 cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+                break;
             }
         }
 
@@ -938,6 +998,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
             snext = scurr;
     }
 
+out:
     if ( snext != scurr &&
          !is_idle_vcpu(current) &&
          vcpu_runnable(current) )
@@ -958,7 +1019,6 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
         }
     }
 
-out:
     ret.time = MAX_SCHEDULE; /* sched quantum */
     ret.task = snext->vcpu;
     if ( spc->d_status == SCHED_DED_VCPU_DONE )
@@ -1252,6 +1312,8 @@ rt_dom_cntl(
                 svc->budget = svc->period; /* force budget = period */
                 spc = rt_pcpu(svc->d_cpu);
                 spc->d_status = SCHED_DED_VCPU_INIT;
+                printk("dom %d vcpu %d is set as dedicated\r\n", d->domain_id, svc->vcpu->vcpu_id);
+                break;
             }
         }
         break;

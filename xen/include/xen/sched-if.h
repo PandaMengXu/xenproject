@@ -21,6 +21,16 @@ extern cpumask_t cpupool_free_cpus;
 #define SCHED_DEFAULT_RATELIMIT_US 1000
 extern int sched_ratelimit_us;
 
+/*  
+ * pcpu status
+ * SCHED_DED_VCPU_NONE: No dedicated VCPU
+ * SCHED_DED_VCPU_INIT: Dedicated VCPU is just set but not set up on pcpu yet.
+ * SCHED_DED_VCPU_DONE: The pcpu run the dedicated VCPU now and
+ *                      its scheduler is disabled
+ */
+#define SCHED_DED_VCPU_NONE         0
+#define SCHED_DED_VCPU_INIT         1
+#define SCHED_DED_VCPU_DONE         2
 
 /*
  * In order to allow a scheduler to remap the lock->cpu mapping,
@@ -46,6 +56,7 @@ struct schedule_data {
 DECLARE_PER_CPU(struct schedule_data, schedule_data);
 DECLARE_PER_CPU(struct scheduler *, scheduler);
 DECLARE_PER_CPU(struct cpupool *, cpupool);
+DECLARE_PER_CPU(uint8_t, d_status);
 
 #define sched_lock(kind, param, cpu, irq, arg...) \
 static inline spinlock_t *kind##_schedule_lock##irq(param EXTRA_TYPE(arg)) \

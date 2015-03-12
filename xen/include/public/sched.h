@@ -162,17 +162,6 @@ DEFINE_XEN_GUEST_HANDLE(sched_watchdog_t);
 #define SHUTDOWN_MAX        4  /* Maximum valid shutdown reason.             */
 /* ` } */
 
-/*
- * pcpu status
- * SCHED_DED_VCPU_NONE: No dedicated VCPU
- * SCHED_DED_VCPU_INIT: Dedicated VCPU is just set but not set up on pcpu yet.
- * SCHED_DED_VCPU_DONE: The pcpu run the dedicated VCPU now and
- * its scheduler is disabled
- */
-#define SCHED_DED_VCPU_NONE         0
-#define SCHED_DED_VCPU_INIT         1
-#define SCHED_DED_VCPU_DONE         2
-
 #endif /* __XEN_PUBLIC_SCHED_H__ */
 
 /*

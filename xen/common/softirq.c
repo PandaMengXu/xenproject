@@ -16,6 +16,7 @@
 #include <xen/sched.h>
 #include <xen/rcupdate.h>
 #include <xen/softirq.h>
+#include <xen/sched-if.h>
 
 #ifndef __ARCH_IRQ_STAT
 irq_cpustat_t irq_stat[NR_CPUS];
@@ -48,6 +49,10 @@ static void __do_softirq(unsigned long ignore_mask)
 
         i = find_first_set_bit(pending);
         clear_bit(i, &softirq_pending(cpu));
+        /* don not raise sched irq on dedicated cpu */
+        if ( per_cpu(d_status,cpu) == SCHED_DED_VCPU_DONE &&
+             i == SCHEDULE_SOFTIRQ)
+            break;
         (*softirq_handlers[i])();
     }
 }

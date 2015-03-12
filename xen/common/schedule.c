@@ -66,6 +66,7 @@ static void poll_timer_fn(void *data);
 /* This is global for now so that private implementations can reach it */
 DEFINE_PER_CPU(struct schedule_data, schedule_data);
 DEFINE_PER_CPU(struct scheduler *, scheduler);
+DEFINE_PER_CPU(uint8_t, d_status); 
 
 static const struct scheduler *schedulers[] = {
     &sched_sedf_def,
@@ -1235,8 +1236,18 @@ static void pcpu_schedule_disable(const struct scheduler *ops, unsigned int cpu)
     if ( ops->sched_id != XEN_SCHEDULER_RTDS )
         return;
 
+    printk("%s cpu %d timer will be disabled soon\r\n", __FUNCTION__, cpu);
     sd = &per_cpu(schedule_data, cpu);
-    stop_timer(&sd->s_timer); /* no longer trigger scheduler by cpu itself */
+//    stop_timer(&sd->s_timer); /* no longer trigger scheduler by cpu itself */
+    kill_timer(&sd->s_timer); /* should disable the callback; reverse is init_timer() */
+    printk("%s cpu %d timer has been disabled\r\n", __FUNCTION__, cpu);
+    printk("%s set per_cpu(d_status, %d) as SCHED_DED_VCPU_DONE"
+           " to disable SCHEDULE_SOFTIRQ START.\r\n",
+           __FUNCTION__, cpu);
+    per_cpu(d_status, cpu) = SCHED_DED_VCPU_DONE;
+    printk("%s set per_cpu(d_status, %d) as SCHED_DED_VCPU_DONE"
+           " to disable SCHEDULE_SOFTIRQ FINISH.\r\n",
+           __FUNCTION__, cpu);
 }
 
 /*
