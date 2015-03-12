@@ -959,7 +959,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
     }
 
 out:
-    ret.time = MIN(snext->budget, MAX_SCHEDULE); /* sched quantum */
+    ret.time = MAX_SCHEDULE; /* sched quantum */
     ret.task = snext->vcpu;
     if ( spc->d_status == SCHED_DED_VCPU_DONE )
         cpumask_set_cpu(cpu, &prv->dedcpus);
