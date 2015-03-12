@@ -261,7 +261,7 @@ rt_dump_vcpu(const struct scheduler *ops, const struct rt_vcpu *svc)
     cpumask_scnprintf(cpustr, sizeof(cpustr), svc->vcpu->cpu_hard_affinity);
     printk("[%5d.%-2u] cpu %u, (%"PRI_stime", %"PRI_stime"),"
            " cur_b=%"PRI_stime" cur_d=%"PRI_stime" last_start=%"PRI_stime"\n"
-           " \t\t onQ=%d runnable=%d cpu_hard_affinity=%s ",
+           " \t\t onQ=%d runnable=%d cpu_hard_affinity=%s d_status=%c",
             svc->vcpu->domain->domain_id,
             svc->vcpu->vcpu_id,
             svc->vcpu->processor,
@@ -272,7 +272,8 @@ rt_dump_vcpu(const struct scheduler *ops, const struct rt_vcpu *svc)
             svc->last_start,
             __vcpu_on_q(svc),
             vcpu_runnable(svc->vcpu),
-            cpustr);
+            cpustr,
+            svc->vcpu->d_status);
     memset(cpustr, 0, sizeof(cpustr));
     cpupool_mask = cpupool_scheduler_cpumask(svc->vcpu->domain->cpupool);
     cpumask_scnprintf(cpustr, sizeof(cpustr), cpupool_mask);
@@ -920,7 +921,6 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
     }
     spin_unlock_irqrestore(&cpu_d_status->d_status_lock, flags);
 
-
 sched:
      /* not dedicated CPU */
     if ( tasklet_work_scheduled )
@@ -943,6 +943,7 @@ sched:
             snext = scurr;
     }
 
+out:
     if ( snext != scurr &&
          !is_idle_vcpu(current) &&
          vcpu_runnable(current) )
@@ -963,8 +964,7 @@ sched:
         }
     }
 
-out:
-    ret.time = MIN(snext->budget, MAX_SCHEDULE); /* sched quantum */
+    ret.time = MAX_SCHEDULE; /* sched quantum */
     ret.task = snext->vcpu;
 
     /* TRACE */
