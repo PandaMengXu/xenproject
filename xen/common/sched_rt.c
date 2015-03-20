@@ -534,6 +534,8 @@ rt_free_vdata(const struct scheduler *ops, void *priv)
     struct rt_vcpu *svc = priv;
 
     xfree(svc);
+    printk("vcpu %d (svc=%08lx) rt_vcpu is freed (NULL)\n",
+           svc->vcpu->vcpu_id, (unsigned long) svc);
 }
 
 /*
@@ -576,6 +578,9 @@ rt_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
 
     BUG_ON( sdom == NULL );
 
+    printk("vcpu %d (svc=%08lx) will be removed from runq\n",
+           vc->vcpu_id, (unsigned long) svc);
+
     lock = vcpu_schedule_lock_irq(vc);
     if ( __vcpu_on_q(svc) )
         __q_remove(svc);
@@ -583,6 +588,9 @@ rt_vcpu_remove(const struct scheduler *ops, struct vcpu *vc)
 
     if ( !is_idle_vcpu(vc) )
         list_del_init(&svc->sdom_elem);
+    
+    printk("vcpu %d (svc=%08lx) has been removed from runq\n",
+           vc->vcpu_id, (unsigned long) svc);
 }
 
 /*
@@ -813,7 +821,7 @@ rt_schedule(const struct scheduler *ops, s_time_t now, bool_t tasklet_work_sched
         }
     }
 
-    ret.time = MIN(snext->budget, MAX_SCHEDULE); /* sched quantum */
+    ret.time = MAX_SCHEDULE; /* sched quantum */
     ret.task = snext->vcpu;
 
     /* TRACE */
