@@ -407,6 +407,13 @@ rt_update_deadline(s_time_t now, struct rt_vcpu *svc)
         svc->cur_deadline += count * svc->period;
     }
 
+    /*
+     * rt_schedule may be scheduled after update deadline
+     * we should only deduct the budget consumed in current period
+     */
+    if ( svc->last_start < (svc->cur_deadline - svc->period) )
+        svc->last_start = svc->cur_deadline - svc->period;
+
     svc->cur_budget = svc->budget;
 
     /* TRACE */
@@ -1195,6 +1202,19 @@ runq_tickle(const struct scheduler *ops, struct rt_vcpu *new)
         goto out;
     }
 
+    /*
+     * new may be preempted due to out of budget
+     * new may replenish its budget before it is contexted switched out
+     * then new may preempt the to-be-scheduled task on its prev cpu
+     */
+    if ( curr_on_cpu(new->vcpu->processor) == new->vcpu &&
+         test_bit(__RTDS_delayed_runq_add, &new->flags) )
+    {
+        SCHED_STAT_CRANK(tickled_busy_cpu);
+        cpu_to_tickle = new->vcpu->processor;
+        goto out;
+    }
+
     /* didn't tickle any cpu */
     SCHED_STAT_CRANK(tickled_no_cpu);
     return;
@@ -1472,6 +1492,7 @@ static void repl_timer_handler(void *data){
     {
         svc = replq_elem(iter);
 
+        /* Another ready VCPU may preempt svc who updates its deadline */
         if ( curr_on_cpu(svc->vcpu->processor) == svc->vcpu &&
              !list_empty(runq) )
         {
@@ -1480,8 +1501,9 @@ static void repl_timer_handler(void *data){
             if ( svc->cur_deadline > next_on_runq->cur_deadline )
                 runq_tickle(ops, next_on_runq);
         }
-        else if ( vcpu_on_q(svc) &&
-                  __test_and_clear_bit(__RTDS_depleted, &svc->flags) )
+        /* svc may preempt another VCPU because it has budget again */
+        if ( __test_and_clear_bit(__RTDS_depleted, &svc->flags) &&
+             vcpu_runnable(svc->vcpu) )
             runq_tickle(ops, svc);
 
         list_del(&svc->replq_elem);
